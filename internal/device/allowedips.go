@@ -46,6 +46,23 @@ func (t *allowedIPs) insert(pfx netip.Prefix, p *peer) {
 	n.peer = p
 }
 
+// remove deletes every prefix that points to p.
+func (t *allowedIPs) remove(p *peer) {
+	var walk func(n *trieNode)
+	walk = func(n *trieNode) {
+		if n == nil {
+			return
+		}
+		if n.peer == p {
+			n.peer = nil
+		}
+		walk(n.child[0])
+		walk(n.child[1])
+	}
+	walk(t.v4)
+	walk(t.v6)
+}
+
 // lookup returns the peer of the longest prefix holding a, or nil.
 func (t *allowedIPs) lookup(a netip.Addr) *peer {
 	if !a.IsValid() {

@@ -199,30 +199,9 @@ func New(cfg Config) (*Device, error) {
 		indices:    make(map[uint32]indexEntry),
 	}
 	for i, pc := range cfg.Peers {
-		if _, dup := d.byKey[pc.PublicKey]; dup {
-			return nil, fmt.Errorf("device: peer %d: duplicate public key", i)
-		}
-		np, err := d.local.NewPeer(pc.PublicKey, pc.PresharedKey)
-		if err != nil {
+		if err := d.AddPeer(pc); err != nil {
 			return nil, fmt.Errorf("device: peer %d: %w", i, err)
 		}
-		if pc.PersistentKeepalive < 0 {
-			return nil, fmt.Errorf("device: peer %d: negative persistent keepalive", i)
-		}
-		p := &peer{
-			key:        pc.PublicKey,
-			noise:      np,
-			endpoint:   pc.Endpoint,
-			persistent: int64(pc.PersistentKeepalive),
-		}
-		for _, pfx := range pc.AllowedIPs {
-			if !pfx.IsValid() {
-				return nil, fmt.Errorf("device: peer %d: invalid allowed IP prefix", i)
-			}
-			d.routes.insert(pfx, p)
-		}
-		d.peers = append(d.peers, p)
-		d.byKey[p.key] = p
 	}
 	return d, nil
 }

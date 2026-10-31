@@ -37,6 +37,12 @@ type Config struct {
 	// OnEvent, if set, is called from the event loop with every event of
 	// the device, in order. It must not block.
 	OnEvent func(device.Event)
+	// Intercept, if set, sees every datagram before the device does and
+	// reports whether it consumed it; the mesh uses it for the replies of
+	// the reflexive endpoint service, which share the socket. It is called
+	// from the socket's reader goroutine, must not block, and b is only
+	// valid during the call.
+	Intercept func(src netip.AddrPort, b []byte) bool
 }
 
 // Stats counts what crossed the node's socket and TUN.
@@ -48,13 +54,14 @@ type Stats struct {
 
 // Node is a running device.
 type Node struct {
-	dev     *device.Device
-	conn    *net.UDPConn
-	tun     tun.Device
-	start   time.Time
-	onEvent func(device.Event)
-	queries chan func(*device.Device)
-	done    chan struct{}
+	dev       *device.Device
+	conn      *net.UDPConn
+	tun       tun.Device
+	start     time.Time
+	onEvent   func(device.Event)
+	intercept func(netip.AddrPort, []byte) bool
+	queries   chan func(*device.Device)
+	done      chan struct{}
 
 	dgIn, dgOut, pktIn, pktOut, writeErrs atomic.Uint64
 }
@@ -78,13 +85,14 @@ func New(cfg Config) (*Node, error) {
 		return nil, err
 	}
 	return &Node{
-		dev:     dev,
-		conn:    cfg.Conn,
-		tun:     cfg.TUN,
-		start:   start,
-		onEvent: cfg.OnEvent,
-		queries: make(chan func(*device.Device)),
-		done:    make(chan struct{}),
+		dev:       dev,
+		conn:      cfg.Conn,
+		tun:       cfg.TUN,
+		start:     start,
+		onEvent:   cfg.OnEvent,
+		intercept: cfg.Intercept,
+		queries:   make(chan func(*device.Device)),
+		done:      make(chan struct{}),
 	}, nil
 }
 
@@ -94,6 +102,13 @@ func (n *Node) PublicKey() [32]byte { return n.dev.PublicKey() }
 // LocalAddr returns the address of the node's socket.
 func (n *Node) LocalAddr() netip.AddrPort {
 	return n.conn.LocalAddr().(*net.UDPAddr).AddrPort()
+}
+
+// WriteTo sends b to dst from the node's socket, outside the device; the
+// mesh uses it for requests that must leave from the WireGuard port.
+func (n *Node) WriteTo(b []byte, dst netip.AddrPort) error {
+	_, err := n.conn.WriteToUDPAddrPort(b, dst)
+	return err
 }
 
 // Stats returns the node's counters.
@@ -213,6 +228,9 @@ func (n *Node) readUDP(ctx context.Context, out chan<- datagram, errc chan<- err
 		// A dual-stack socket reports IPv4 peers as IPv4-mapped IPv6;
 		// the core's endpoints are plain IPv4.
 		src = netip.AddrPortFrom(src.Addr().Unmap(), src.Port())
+		if n.intercept != nil && n.intercept(src, buf[:k]) {
+			continue
+		}
 		select {
 		case out <- datagram{src: src, data: append([]byte(nil), buf[:k]...)}:
 		case <-ctx.Done():

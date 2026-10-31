@@ -15,9 +15,10 @@ import (
 	"github.com/CesarManzoCode/malla-wg/internal/device"
 )
 
-// config is node.json (contract §3.4). The fields of the coordination,
-// the relay and the control socket are read but not used yet: without
-// coord_url the node runs in static mode from address and peers.
+// config is node.json (contract §3.4). Without coord_url the node runs in
+// static mode from address and peers; with it, in mesh mode, where name
+// and tags identify the node to the policy. The relay fields are read but
+// not used yet.
 type config struct {
 	PrivateKeyFile   string       `json:"private_key_file"`
 	ListenPort       uint16       `json:"listen_port"`
@@ -30,6 +31,8 @@ type config struct {
 	TUNName          string       `json:"tun_name"`
 	Address          string       `json:"address"`
 	Peers            []peerConfig `json:"peers"`
+	Name             string       `json:"name"`
+	Tags             []string     `json:"tags"`
 }
 
 type peerConfig struct {
@@ -49,7 +52,20 @@ type static struct {
 	dev        device.Config
 }
 
-func loadConfig(path string) (*static, error) {
+// meshMode is a validated mesh-mode configuration.
+type meshMode struct {
+	listenPort uint16
+	tunName    string
+	privateKey [32]byte
+	name       string
+	tags       []string
+	coordURL   string
+	coordFP    string
+	authKey    string
+	stateDir   string
+}
+
+func readConfig(path string) (*config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -60,17 +76,45 @@ func loadConfig(path string) (*static, error) {
 	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	if c.CoordURL != "" {
-		return nil, errors.New("coord_url: coordination is not implemented yet; use static mode (address and peers)")
+	return &c, nil
+}
+
+// relTo makes p relative to the directory of the configuration file.
+func relTo(path, p string) string {
+	if p == "" || filepath.IsAbs(p) {
+		return p
 	}
-	// Relative key files are relative to the configuration file.
-	dir := filepath.Dir(path)
-	rel := func(p string) string {
-		if p == "" || filepath.IsAbs(p) {
-			return p
-		}
-		return filepath.Join(dir, p)
+	return filepath.Join(filepath.Dir(path), p)
+}
+
+func loadMesh(path string, c *config) (*meshMode, error) {
+	if c.Address != "" || len(c.Peers) > 0 {
+		return nil, errors.New("address and peers are for static mode; with coord_url the map brings them")
 	}
+	if c.StateDir == "" {
+		return nil, errors.New("state_dir is required with coord_url")
+	}
+	if c.Name == "" {
+		return nil, errors.New("name is required with coord_url")
+	}
+	m := &meshMode{
+		listenPort: c.ListenPort, tunName: c.TUNName, name: c.Name, tags: c.Tags,
+		coordURL: c.CoordURL, coordFP: c.CoordFingerprint, authKey: c.AuthKey,
+		stateDir: relTo(path, c.StateDir),
+	}
+	var err error
+	if m.privateKey, err = readKeyFile(relTo(path, c.PrivateKeyFile)); err != nil {
+		return nil, fmt.Errorf("private_key_file: %w", err)
+	}
+	return m, nil
+}
+
+func loadStatic(path string, c *config) (*static, error) {
+	if c.Name != "" || len(c.Tags) > 0 {
+		return nil, errors.New("name and tags need coord_url")
+	}
+	rel := func(p string) string { return relTo(path, p) }
+	var err error
 	s := &static{listenPort: c.ListenPort, tunName: c.TUNName}
 	if s.address, err = netip.ParsePrefix(c.Address); err != nil {
 		return nil, fmt.Errorf("address: %w", err)

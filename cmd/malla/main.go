@@ -1,5 +1,6 @@
 // Command malla is the node of the mesh. In this version it only has
-// `malla up` in static mode: the peers come from the configuration file.
+// `malla up`: in static mode the peers come from the configuration file,
+// and with coord_url they come from the coordination's map.
 package main
 
 import (
@@ -8,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,6 +18,7 @@ import (
 	"syscall"
 
 	"github.com/CesarManzoCode/malla-wg/internal/device"
+	"github.com/CesarManzoCode/malla-wg/internal/mesh"
 	"github.com/CesarManzoCode/malla-wg/internal/runtime"
 	"github.com/CesarManzoCode/malla-wg/internal/tun"
 )
@@ -51,7 +54,18 @@ func main() {
 }
 
 func up(path string) error {
-	cfg, err := loadConfig(path)
+	c, err := readConfig(path)
+	if err != nil {
+		return err
+	}
+	if c.CoordURL != "" {
+		m, err := loadMesh(path, c)
+		if err != nil {
+			return err
+		}
+		return upMesh(m)
+	}
+	cfg, err := loadStatic(path, c)
 	if err != nil {
 		return err
 	}
@@ -82,6 +96,55 @@ func up(path string) error {
 	// The test harness waits for this line: from here on the TUN is up
 	// and the socket is listening.
 	fmt.Printf("malla: up %s %s listen %d key %s\n", dev.Name(), cfg.address,
+		node.LocalAddr().Port(), base64.StdEncoding.EncodeToString(pub[:]))
+	err = node.Run(ctx)
+	s := node.Stats()
+	fmt.Fprintf(os.Stderr, "malla: down: datagrams in %d out %d, tun in %d out %d, write errors %d\n",
+		s.DatagramsIn, s.DatagramsOut, s.PacketsIn, s.PacketsOut, s.WriteErrors)
+	return err
+}
+
+// meshBits is the prefix length of the mesh (D18, 10.200.0.0/16): the
+// TUN's connected route covers every peer, whose allowed IP is its /32.
+const meshBits = 16
+
+// upMesh runs the node in mesh mode: it registers with the coordination
+// (or starts from the cached map), gives the TUN the address the
+// coordination assigned and follows the map until a signal arrives.
+func upMesh(m *meshMode) error {
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: int(m.listenPort)})
+	if err != nil {
+		return err
+	}
+	dev, err := tun.OpenLinux(m.tunName)
+	if err != nil {
+		conn.Close()
+		return err
+	}
+	node, err := mesh.New(mesh.Config{
+		PrivateKey: m.privateKey, Name: m.name, Tags: m.tags,
+		CoordURL: m.coordURL, CoordFingerprint: m.coordFP, AuthKey: m.authKey,
+		StateDir: m.stateDir, Conn: conn, TUN: dev, MTU: mtu,
+		OnEvent: logEvent,
+		Logf: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, format+"\n", args...)
+		},
+	})
+	if err != nil {
+		conn.Close()
+		dev.Close()
+		return err
+	}
+	address := netip.PrefixFrom(node.Addr(), meshBits)
+	if err := configureTUN(dev.Name(), &static{address: address}); err != nil {
+		conn.Close()
+		dev.Close()
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	pub := node.PublicKey()
+	fmt.Printf("malla: up %s %s listen %d key %s\n", dev.Name(), address,
 		node.LocalAddr().Port(), base64.StdEncoding.EncodeToString(pub[:]))
 	err = node.Run(ctx)
 	s := node.Stats()
