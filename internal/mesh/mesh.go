@@ -22,7 +22,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -140,6 +139,10 @@ func New(cfg Config) (*Node, error) {
 		return nil, err
 	}
 	n.discoPub = x25519.PublicKey(disco)
+	// The bind speaks disco with this key, and the coordination publishes
+	// its public half in every map (register sends discoPub).
+	n.bind.SetDisco(disco, n.pub, rand.Reader)
+	n.bind.SetExclude(coord.MeshPrefix)
 	n.reflexive = reflexiveAddr(cfg.CoordURL, cfg.ReflexivePort)
 
 	cache, cacheErr := coord.LoadCache(cfg.StateDir)
@@ -163,6 +166,7 @@ func New(cfg Config) (*Node, error) {
 		for _, p := range cache.Peers {
 			pc, cands := peerConfig(p)
 			pc.Endpoint = n.bind.AddPeer(pc.PublicKey, cands)
+			n.bind.SetDiscoKey(pc.PublicKey, p.DiscoKey)
 			dc.Peers = append(dc.Peers, pc)
 		}
 	}
@@ -339,7 +343,7 @@ func (n *Node) register(ctx context.Context) error {
 // the device already has.
 func (n *Node) coordinate(ctx context.Context) {
 	var since uint64
-	var reported []string
+	var reported []netip.AddrPort
 	needReport := true
 	var lastDiscover time.Time
 	for ctx.Err() == nil {
@@ -357,9 +361,17 @@ func (n *Node) coordinate(ctx context.Context) {
 		if needReport || time.Since(lastDiscover) >= rediscoverEvery {
 			eps := n.discover(ctx)
 			lastDiscover = time.Now()
-			if needReport || !slices.Equal(eps, reported) {
+			if needReport || magic.EndpointsChanged(reported, eps) {
+				// CallMeMaybe carries the same endpoints the map does.
+				if n.rt.Query(ctx, func(*device.Device) { n.bind.SetEndpoints(eps) }) != nil {
+					continue
+				}
+				strs := make([]string, len(eps))
+				for i, ap := range eps {
+					strs[i] = ap.String()
+				}
 				rctx, cancel := context.WithTimeout(ctx, registerTimeout)
-				err := n.client.ReportEndpoints(rctx, eps)
+				err := n.client.ReportEndpoints(rctx, strs)
 				cancel()
 				if err != nil {
 					n.coordFailed(ctx, "report endpoints", err)
@@ -422,11 +434,14 @@ func (n *Node) apply(ctx context.Context, nm coord.Netmap, raw []byte) {
 			if n.bind.Has(pc.PublicKey) {
 				// The device keeps its pseudo endpoint; only the
 				// candidates change, and the address the peer was last
-				// heard from stays.
+				// heard from stays. New candidates open a hole
+				// punching window.
 				n.bind.SetCandidates(pc.PublicKey, cands)
+				n.bind.SetDiscoKey(pc.PublicKey, p.DiscoKey)
 				continue
 			}
 			pc.Endpoint = n.bind.AddPeer(pc.PublicKey, cands)
+			n.bind.SetDiscoKey(pc.PublicKey, p.DiscoKey)
 			if err := d.AddPeer(pc); err != nil {
 				n.bind.RemovePeer(pc.PublicKey)
 				n.cfg.Logf("mesh: peer %s: %v", p.Name, err)
@@ -474,22 +489,12 @@ func (n *Node) PeerPath(ctx context.Context, key [32]byte) (magic.Path, netip.Ad
 	return path, ep, err
 }
 
-// discover returns the node's endpoints: the reflexive one first, then the
-// local ones, without repeats.
-func (n *Node) discover(ctx context.Context) []string {
-	var eps []string
-	add := func(ap netip.AddrPort) {
-		if s := ap.String(); ap.IsValid() && !slices.Contains(eps, s) {
-			eps = append(eps, s)
-		}
-	}
-	if ap, ok := n.queryReflexive(ctx); ok {
-		add(ap)
-	}
-	for _, ap := range localEndpoints(n.rt.LocalAddr()) {
-		add(ap)
-	}
-	return eps
+// discover returns the node's endpoints (magic.Endpoints): the reflexive
+// one first, then the local ones with the socket's port.
+func (n *Node) discover(ctx context.Context) []netip.AddrPort {
+	reflexive, _ := n.queryReflexive(ctx)
+	local := n.rt.LocalAddr()
+	return magic.Endpoints(reflexive, localAddrs(local), local.Port(), coord.MeshPrefix)
 }
 
 // queryReflexive asks the reflexive service, from the WireGuard socket,
@@ -541,15 +546,14 @@ func (n *Node) intercept(_ netip.AddrPort, b []byte) bool {
 	return true
 }
 
-// localEndpoints returns the socket's address if it is bound to one, or
-// else the addresses of the host's interfaces that are up, without
-// loopback and without the mesh's own addresses (the TUN), with the
-// socket's port.
-func localEndpoints(local netip.AddrPort) []netip.AddrPort {
+// localAddrs returns the socket's address if it is bound to one, or else
+// the IPv4 addresses of the host's interfaces that are up, without
+// loopback and without the mesh's own addresses (the TUN).
+func localAddrs(local netip.AddrPort) []netip.Addr {
 	if a := local.Addr().Unmap(); !a.IsUnspecified() {
-		return []netip.AddrPort{netip.AddrPortFrom(a, local.Port())}
+		return []netip.Addr{a}
 	}
-	var eps []netip.AddrPort
+	var eps []netip.Addr
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil
@@ -567,7 +571,7 @@ func localEndpoints(local netip.AddrPort) []netip.AddrPort {
 			if err != nil || !pfx.Addr().Is4() || coord.MeshPrefix.Contains(pfx.Addr()) {
 				continue
 			}
-			eps = append(eps, netip.AddrPortFrom(pfx.Addr(), local.Port()))
+			eps = append(eps, pfx.Addr())
 		}
 	}
 	return eps

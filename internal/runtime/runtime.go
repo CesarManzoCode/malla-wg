@@ -46,7 +46,9 @@ type Config struct {
 	Intercept func(src netip.AddrPort, b []byte) bool
 	// Bind, if set, sits between the device and the network: every
 	// datagram goes through it both ways, and it decides per peer between
-	// a UDP address and the relay. Only the event loop touches it; others
+	// a UDP address and the relay. Disco datagrams, from the socket or the
+	// relay, go to it and never to the device, and its timer runs in the
+	// loop next to the device's. Only the event loop touches it; others
 	// reach it through Query.
 	Bind *magic.Bind
 	// RelaySend sends a datagram through the relay to the node with the
@@ -201,7 +203,11 @@ func (n *Node) Run(ctx context.Context) error {
 	timer.Stop()
 	armed := device.Never
 	for {
-		if at := n.dev.NextDeadline(); at != armed {
+		at := n.dev.NextDeadline()
+		if n.bind != nil {
+			at = min(at, n.bind.NextDeadline())
+		}
+		if at != armed {
 			armed = at
 			if at == device.Never {
 				timer.Stop()
@@ -217,6 +223,10 @@ func (n *Node) Run(ctx context.Context) error {
 		case d := <-udpIn:
 			n.dgIn.Add(1)
 			now := n.now()
+			if n.bind != nil && magic.IsDisco(d.data) {
+				n.transmit(n.bind.DiscoUDP(now, d.src, d.data))
+				continue
+			}
 			src := d.src
 			if n.bind != nil {
 				src = n.bind.FromUDP(now, src, d.data)
@@ -224,6 +234,10 @@ func (n *Node) Run(ctx context.Context) error {
 			n.apply(n.dev.HandleUDP(now, src, d.data))
 		case r := <-n.relayIn:
 			n.relayRx.Add(1)
+			if magic.IsDisco(r.data) {
+				n.transmit(n.bind.DiscoRelay(n.now(), r.src, r.data))
+				continue
+			}
 			if src, ok := n.bind.FromRelay(r.src, r.data); ok {
 				n.apply(n.dev.HandleUDP(n.now(), src, r.data))
 			}
@@ -232,7 +246,13 @@ func (n *Node) Run(ctx context.Context) error {
 			n.apply(n.dev.HandleTUN(n.now(), pkt))
 		case <-timer.C:
 			armed = device.Never
-			n.apply(n.dev.Tick(n.now()))
+			now := n.now()
+			if n.dev.NextDeadline() <= now {
+				n.apply(n.dev.Tick(now))
+			}
+			if n.bind != nil {
+				n.transmit(n.bind.Tick(now))
+			}
 		case fn := <-n.queries:
 			fn(n.dev)
 		}
@@ -268,17 +288,22 @@ func (n *Node) apply(out device.Output) {
 			n.writeUDP(d.Data, d.Dst)
 			continue
 		}
-		for _, t := range n.bind.Route(n.now(), d.Dst, d.Data) {
-			if !t.Relay {
-				n.writeUDP(t.Data, t.Dst)
-				continue
-			}
-			if n.relaySend == nil || !n.relaySend(t.RelayTo, t.Data) {
-				n.writeErrs.Add(1)
-				continue
-			}
-			n.relayTx.Add(1)
+		n.transmit(n.bind.Route(n.now(), d.Dst, d.Data))
+	}
+}
+
+// transmit puts what the bind decided on the network.
+func (n *Node) transmit(ts []magic.Transmit) {
+	for _, t := range ts {
+		if !t.Relay {
+			n.writeUDP(t.Data, t.Dst)
+			continue
 		}
+		if n.relaySend == nil || !n.relaySend(t.RelayTo, t.Data) {
+			n.writeErrs.Add(1)
+			continue
+		}
+		n.relayTx.Add(1)
 	}
 }
 
