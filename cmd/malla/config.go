@@ -17,8 +17,9 @@ import (
 
 // config is node.json (contract §3.4). Without coord_url the node runs in
 // static mode from address and peers; with it, in mesh mode, where name
-// and tags identify the node to the policy. The relay fields are read but
-// not used yet.
+// and tags identify the node to the policy and relay_fingerprint pins the
+// relay that the map announces (relay_url is used while it announces
+// none). Static mode has no relay.
 type config struct {
 	PrivateKeyFile   string       `json:"private_key_file"`
 	ListenPort       uint16       `json:"listen_port"`
@@ -63,6 +64,8 @@ type meshMode struct {
 	coordFP    string
 	authKey    string
 	stateDir   string
+	relayURL   string
+	relayFP    string
 }
 
 func readConfig(path string) (*config, error) {
@@ -101,6 +104,7 @@ func loadMesh(path string, c *config) (*meshMode, error) {
 		listenPort: c.ListenPort, tunName: c.TUNName, name: c.Name, tags: c.Tags,
 		coordURL: c.CoordURL, coordFP: c.CoordFingerprint, authKey: c.AuthKey,
 		stateDir: relTo(path, c.StateDir),
+		relayURL: c.RelayURL, relayFP: c.RelayFingerprint,
 	}
 	var err error
 	if m.privateKey, err = readKeyFile(relTo(path, c.PrivateKeyFile)); err != nil {
@@ -112,6 +116,9 @@ func loadMesh(path string, c *config) (*meshMode, error) {
 func loadStatic(path string, c *config) (*static, error) {
 	if c.Name != "" || len(c.Tags) > 0 {
 		return nil, errors.New("name and tags need coord_url")
+	}
+	if c.RelayURL != "" || c.RelayFingerprint != "" {
+		return nil, errors.New("relay_url and relay_fingerprint need coord_url")
 	}
 	rel := func(p string) string { return relTo(path, p) }
 	var err error

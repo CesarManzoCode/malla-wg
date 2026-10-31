@@ -37,7 +37,12 @@ func Fingerprint(der []byte) string {
 // self-signed ECDSA P-256 one on the first start, and returns it with its
 // fingerprint.
 func LoadOrCreateCert(dir string) (tls.Certificate, string, error) {
-	certPath, keyPath := filepath.Join(dir, CertFile), filepath.Join(dir, KeyFile)
+	return LoadOrCreateCertFiles(filepath.Join(dir, CertFile), filepath.Join(dir, KeyFile), "malla-coord")
+}
+
+// LoadOrCreateCertFiles is LoadOrCreateCert with explicit file paths and
+// the certificate's common name; the relay keeps its own pair with it.
+func LoadOrCreateCertFiles(certPath, keyPath, commonName string) (tls.Certificate, string, error) {
 	if cert, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil {
 		return cert, Fingerprint(cert.Certificate[0]), nil
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -54,7 +59,7 @@ func LoadOrCreateCert(dir string) (tls.Certificate, string, error) {
 	now := time.Now()
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "malla-coord"},
+		Subject:      pkix.Name{CommonName: commonName},
 		NotBefore:    now.Add(-time.Hour),
 		NotAfter:     now.AddDate(20, 0, 0),
 		KeyUsage:     x509.KeyUsageDigitalSignature,

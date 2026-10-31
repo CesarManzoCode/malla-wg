@@ -5,6 +5,10 @@
 // node the map does not list has no peer, so its handshakes fail and
 // nothing from it reaches the TUN. When the coordination does not answer
 // the node keeps running on the last map, cached in state_dir/netmap.json.
+//
+// Between the device and the network sits the bind of internal/magic:
+// each peer has a direct path or goes through the relay that the map
+// announces, and the device's sessions do not depend on which.
 package mesh
 
 import (
@@ -21,10 +25,13 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/CesarManzoCode/malla-wg/internal/coord"
 	"github.com/CesarManzoCode/malla-wg/internal/device"
+	"github.com/CesarManzoCode/malla-wg/internal/magic"
+	"github.com/CesarManzoCode/malla-wg/internal/relay"
 	"github.com/CesarManzoCode/malla-wg/internal/runtime"
 	"github.com/CesarManzoCode/malla-wg/internal/tun"
 	"github.com/CesarManzoCode/malla-wg/internal/x25519"
@@ -55,6 +62,11 @@ type Config struct {
 	// ReflexivePort is the UDP port of the reflexive endpoint service on
 	// the coordination's host; 0 means coord.DefaultReflexivePort.
 	ReflexivePort uint16
+	// RelayURL is the relay used while the map announces none; the map's
+	// relay wins. RelayFingerprint pins the relay's certificate; without
+	// it no relay is used.
+	RelayURL         string
+	RelayFingerprint string
 
 	StateDir string
 	Conn     *net.UDPConn
@@ -75,16 +87,19 @@ type Node struct {
 	rt        *runtime.Node
 	reflexive netip.AddrPort
 	replies   chan reflexiveReply
+	// bind is touched only inside the device's event loop (rt.Query).
+	bind *magic.Bind
+
+	// relay is the current relay client; relayRun starts the client of
+	// each new relay URL. Only the coordination loop changes relayURL.
+	relay    atomic.Pointer[relay.Client]
+	relayRun chan *relay.Client
+	relayURL string
 
 	mu         sync.Mutex
 	addr       netip.Addr
 	id         uint64
 	registered bool
-
-	// mapEndpoint is the endpoint the map last gave each peer; the device
-	// gets a new one only when the map's changes, so roaming is not undone
-	// by every map. Only the coordination loop touches it.
-	mapEndpoint map[[32]byte]netip.AddrPort
 }
 
 type reflexiveReply struct {
@@ -113,11 +128,12 @@ func New(cfg Config) (*Node, error) {
 		return nil, err
 	}
 	n := &Node{
-		cfg:         cfg,
-		pub:         x25519.PublicKey(cfg.PrivateKey),
-		client:      client,
-		replies:     make(chan reflexiveReply, 8),
-		mapEndpoint: make(map[[32]byte]netip.AddrPort),
+		cfg:      cfg,
+		pub:      x25519.PublicKey(cfg.PrivateKey),
+		client:   client,
+		replies:  make(chan reflexiveReply, 8),
+		bind:     magic.New(),
+		relayRun: make(chan *relay.Client, 1),
 	}
 	disco, err := loadOrCreateKey(filepath.Join(cfg.StateDir, DiscoKeyFile))
 	if err != nil {
@@ -145,16 +161,98 @@ func New(cfg Config) (*Node, error) {
 	dc := device.Config{PrivateKey: cfg.PrivateKey, MTU: cfg.MTU}
 	if cacheErr == nil {
 		for _, p := range cache.Peers {
-			pc, ep := peerConfig(p)
+			pc, cands := peerConfig(p)
+			pc.Endpoint = n.bind.AddPeer(pc.PublicKey, cands)
 			dc.Peers = append(dc.Peers, pc)
-			n.mapEndpoint[pc.PublicKey] = ep
 		}
 	}
-	n.rt, err = runtime.New(runtime.Config{Device: dc, Conn: cfg.Conn, TUN: cfg.TUN, OnEvent: cfg.OnEvent, Intercept: n.intercept})
+	n.rt, err = runtime.New(runtime.Config{
+		Device: dc, Conn: cfg.Conn, TUN: cfg.TUN, OnEvent: cfg.OnEvent, Intercept: n.intercept,
+		Bind: n.bind, RelaySend: n.relaySend,
+	})
 	if err != nil {
 		return nil, err
 	}
+	relayURL := cfg.RelayURL
+	if cacheErr == nil && cache.Relay != "" {
+		relayURL = cache.Relay
+	}
+	n.useRelay(relayURL)
 	return n, nil
+}
+
+// relaySend is the runtime's way out through the relay.
+func (n *Node) relaySend(key [32]byte, b []byte) bool {
+	c := n.relay.Load()
+	return c != nil && c.Send(key, b)
+}
+
+// useRelay switches to the relay at target, or to none if target is empty or
+// there is no fingerprint to pin. It runs before Run or in the
+// coordination loop.
+func (n *Node) useRelay(target string) {
+	if n.cfg.RelayFingerprint == "" {
+		if target != "" && target != n.relayURL {
+			n.cfg.Logf("mesh: relay %s announced but relay_fingerprint is not set; not using it", target)
+		}
+		n.relayURL = target
+		return
+	}
+	if target == n.relayURL {
+		return
+	}
+	n.relayURL = target
+	var c *relay.Client
+	if target != "" {
+		var err error
+		c, err = relay.NewClient(relay.ClientConfig{
+			URL: target, Fingerprint: n.cfg.RelayFingerprint, NodeKey: n.pub,
+			OnPacket: n.rt.DeliverRelay,
+			OnState:  n.setRelayUp,
+			Logf:     n.cfg.Logf,
+		})
+		if err != nil {
+			n.cfg.Logf("mesh: relay: %v", err)
+			c = nil
+		}
+	}
+	// Drop a client that Run has not picked up yet.
+	select {
+	case <-n.relayRun:
+	default:
+	}
+	n.relayRun <- c
+}
+
+// runRelay runs one relay client at a time, the last one useRelay chose.
+// The client tells the bind when it comes up and goes down.
+func (n *Node) runRelay(ctx context.Context) {
+	stop := func() {}
+	defer func() { stop() }()
+	for {
+		var c *relay.Client
+		select {
+		case <-ctx.Done():
+			return
+		case c = <-n.relayRun:
+		}
+		stop()
+		n.relay.Store(c)
+		if c == nil {
+			stop = func() {}
+			continue
+		}
+		cctx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { c.Run(cctx); close(done) }()
+		stop = func() { cancel(); <-done }
+	}
+}
+
+// setRelayUp tells the bind whether the relay is up; it is the relay
+// client's OnState, so it runs on the client's reader goroutine.
+func (n *Node) setRelayUp(up bool) {
+	n.rt.Query(context.Background(), func(*device.Device) { n.bind.SetRelay(up) })
 }
 
 // PublicKey returns the node's WireGuard public key.
@@ -201,8 +299,9 @@ func (n *Node) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var wg sync.WaitGroup
-	wg.Add(1)
+	wg.Add(2)
 	go func() { defer wg.Done(); n.coordinate(ctx) }()
+	go func() { defer wg.Done(); n.runRelay(ctx) }()
 	err := n.rt.Run(ctx)
 	cancel()
 	wg.Wait()
@@ -315,46 +414,64 @@ func (n *Node) apply(ctx context.Context, nm coord.Netmap, raw []byte) {
 		for _, k := range d.Peers() {
 			if !want[k] {
 				d.RemovePeer(k)
-				delete(n.mapEndpoint, k)
+				n.bind.RemovePeer(k)
 			}
 		}
 		for _, p := range nm.Peers {
-			pc, ep := peerConfig(p)
-			old, known := n.mapEndpoint[pc.PublicKey]
-			switch {
-			case !known:
-				if err := d.AddPeer(pc); err != nil {
-					n.cfg.Logf("mesh: peer %s: %v", p.Name, err)
-					continue
-				}
-			case ep.IsValid() && ep != old:
-				d.SetEndpoint(pc.PublicKey, ep)
+			pc, cands := peerConfig(p)
+			if n.bind.Has(pc.PublicKey) {
+				// The device keeps its pseudo endpoint; only the
+				// candidates change, and the address the peer was last
+				// heard from stays.
+				n.bind.SetCandidates(pc.PublicKey, cands)
+				continue
 			}
-			n.mapEndpoint[pc.PublicKey] = ep
+			pc.Endpoint = n.bind.AddPeer(pc.PublicKey, cands)
+			if err := d.AddPeer(pc); err != nil {
+				n.bind.RemovePeer(pc.PublicKey)
+				n.cfg.Logf("mesh: peer %s: %v", p.Name, err)
+			}
 		}
 	})
 	if err != nil {
 		return
 	}
+	relayURL := nm.Relay
+	if relayURL == "" {
+		relayURL = n.cfg.RelayURL
+	}
+	n.useRelay(relayURL)
 	if err := coord.SaveCache(n.cfg.StateDir, raw); err != nil {
 		n.cfg.Logf("mesh: cache: %v", err)
 	}
 }
 
-// peerConfig turns a peer of the map into a device peer: its key, its
-// address as the only allowed IP, and its first endpoint that parses.
-func peerConfig(p coord.Node) (device.PeerConfig, netip.AddrPort) {
+// peerConfig turns a peer of the map into a device peer, its key and its
+// address as the only allowed IP, and returns the endpoints that parse as
+// the bind's direct candidates. The device's endpoint is left for the
+// bind's pseudo endpoint.
+func peerConfig(p coord.Node) (device.PeerConfig, []netip.AddrPort) {
 	pc := device.PeerConfig{PublicKey: p.NodeKey}
 	if p.Addr.IsValid() {
 		pc.AllowedIPs = []netip.Prefix{netip.PrefixFrom(p.Addr, p.Addr.BitLen())}
 	}
+	var cands []netip.AddrPort
 	for _, e := range p.Endpoints {
-		if ap, err := netip.ParseAddrPort(e); err == nil {
-			pc.Endpoint = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
-			break
+		// An address of the mesh would send the tunnel through itself.
+		if ap, err := netip.ParseAddrPort(e); err == nil && !coord.MeshPrefix.Contains(ap.Addr().Unmap()) {
+			cands = append(cands, netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()))
 		}
 	}
-	return pc, pc.Endpoint
+	return pc, cands
+}
+
+// PeerPath returns how the peer with key is reached now: direct with its
+// address, relay, or none.
+func (n *Node) PeerPath(ctx context.Context, key [32]byte) (magic.Path, netip.AddrPort, error) {
+	var path magic.Path
+	var ep netip.AddrPort
+	err := n.rt.Query(ctx, func(*device.Device) { path, ep = n.bind.PathOf(n.rt.Now(), key) })
+	return path, ep, err
 }
 
 // discover returns the node's endpoints: the reflexive one first, then the
@@ -426,7 +543,8 @@ func (n *Node) intercept(_ netip.AddrPort, b []byte) bool {
 
 // localEndpoints returns the socket's address if it is bound to one, or
 // else the addresses of the host's interfaces that are up, without
-// loopback, with the socket's port.
+// loopback and without the mesh's own addresses (the TUN), with the
+// socket's port.
 func localEndpoints(local netip.AddrPort) []netip.AddrPort {
 	if a := local.Addr().Unmap(); !a.IsUnspecified() {
 		return []netip.AddrPort{netip.AddrPortFrom(a, local.Port())}
@@ -446,7 +564,7 @@ func localEndpoints(local netip.AddrPort) []netip.AddrPort {
 		}
 		for _, a := range addrs {
 			pfx, err := netip.ParsePrefix(a.String())
-			if err != nil || !pfx.Addr().Is4() {
+			if err != nil || !pfx.Addr().Is4() || coord.MeshPrefix.Contains(pfx.Addr()) {
 				continue
 			}
 			eps = append(eps, netip.AddrPortFrom(pfx.Addr(), local.Port()))

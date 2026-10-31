@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/CesarManzoCode/malla-wg/internal/device"
+	"github.com/CesarManzoCode/malla-wg/internal/magic"
 	"github.com/CesarManzoCode/malla-wg/internal/tun"
 )
 
@@ -43,11 +44,20 @@ type Config struct {
 	// from the socket's reader goroutine, must not block, and b is only
 	// valid during the call.
 	Intercept func(src netip.AddrPort, b []byte) bool
+	// Bind, if set, sits between the device and the network: every
+	// datagram goes through it both ways, and it decides per peer between
+	// a UDP address and the relay. Only the event loop touches it; others
+	// reach it through Query.
+	Bind *magic.Bind
+	// RelaySend sends a datagram through the relay to the node with the
+	// given key and reports whether it was queued. It must not block.
+	RelaySend func(key [32]byte, b []byte) bool
 }
 
 // Stats counts what crossed the node's socket and TUN.
 type Stats struct {
 	DatagramsIn, DatagramsOut uint64
+	RelayIn, RelayOut         uint64 // datagrams through the relay
 	PacketsIn, PacketsOut     uint64 // read from and written to the TUN
 	WriteErrors               uint64
 }
@@ -60,10 +70,18 @@ type Node struct {
 	start     time.Time
 	onEvent   func(device.Event)
 	intercept func(netip.AddrPort, []byte) bool
+	bind      *magic.Bind
+	relaySend func([32]byte, []byte) bool
 	queries   chan func(*device.Device)
+	relayIn   chan relayed
 	done      chan struct{}
 
-	dgIn, dgOut, pktIn, pktOut, writeErrs atomic.Uint64
+	dgIn, dgOut, pktIn, pktOut, writeErrs, relayRx, relayTx atomic.Uint64
+}
+
+type relayed struct {
+	src  [32]byte
+	data []byte
 }
 
 type datagram struct {
@@ -91,7 +109,10 @@ func New(cfg Config) (*Node, error) {
 		start:     start,
 		onEvent:   cfg.OnEvent,
 		intercept: cfg.Intercept,
+		bind:      cfg.Bind,
+		relaySend: cfg.RelaySend,
 		queries:   make(chan func(*device.Device)),
+		relayIn:   make(chan relayed, queueDepth),
 		done:      make(chan struct{}),
 	}, nil
 }
@@ -117,6 +138,20 @@ func (n *Node) Stats() Stats {
 		DatagramsIn: n.dgIn.Load(), DatagramsOut: n.dgOut.Load(),
 		PacketsIn: n.pktIn.Load(), PacketsOut: n.pktOut.Load(),
 		WriteErrors: n.writeErrs.Load(),
+		RelayIn:     n.relayRx.Load(), RelayOut: n.relayTx.Load(),
+	}
+}
+
+// DeliverRelay hands the event loop a datagram that the relay delivered
+// from the node with key src. It copies b, never blocks, and drops the
+// datagram if the loop is behind or there is no Bind.
+func (n *Node) DeliverRelay(src [32]byte, b []byte) {
+	if n.bind == nil {
+		return
+	}
+	select {
+	case n.relayIn <- relayed{src: src, data: append([]byte(nil), b...)}:
+	default:
 	}
 }
 
@@ -137,6 +172,10 @@ func (n *Node) Query(ctx context.Context, fn func(*device.Device)) error {
 
 // now is the monotonic time of the core: nanoseconds since New.
 func (n *Node) now() int64 { return int64(time.Since(n.start)) }
+
+// Now returns the monotonic time the core sees, for callers of Query that
+// pass a time to the Bind.
+func (n *Node) Now() int64 { return n.now() }
 
 // Run is the event loop. It returns nil when ctx is done, or the error
 // that stopped a reader; either way it closes the socket and the TUN and
@@ -177,7 +216,17 @@ func (n *Node) Run(ctx context.Context) error {
 			return err
 		case d := <-udpIn:
 			n.dgIn.Add(1)
-			n.apply(n.dev.HandleUDP(n.now(), d.src, d.data))
+			now := n.now()
+			src := d.src
+			if n.bind != nil {
+				src = n.bind.FromUDP(now, src, d.data)
+			}
+			n.apply(n.dev.HandleUDP(now, src, d.data))
+		case r := <-n.relayIn:
+			n.relayRx.Add(1)
+			if src, ok := n.bind.FromRelay(r.src, r.data); ok {
+				n.apply(n.dev.HandleUDP(n.now(), src, r.data))
+			}
 		case pkt := <-tunIn:
 			n.pktIn.Add(1)
 			n.apply(n.dev.HandleTUN(n.now(), pkt))
@@ -194,9 +243,17 @@ func (n *Node) Run(ctx context.Context) error {
 // then datagrams, each in the device's order. Write errors are counted,
 // not fatal: a lost datagram is what UDP allows anyway.
 func (n *Node) apply(out device.Output) {
-	if n.onEvent != nil {
-		for _, e := range out.Events {
+	for _, e := range out.Events {
+		if n.onEvent != nil {
 			n.onEvent(e)
+		}
+		// The device roamed a managed peer to a real address the bind did
+		// not know: the bind takes it as the peer's direct address and the
+		// device goes back to the pseudo endpoint.
+		if n.bind != nil && e.Kind == device.EventEndpoint && !magic.IsPseudo(e.Endpoint) {
+			if pseudo, ok := n.bind.Roamed(n.now(), e.Peer, e.Endpoint); ok {
+				n.dev.SetEndpoint(e.Peer, pseudo)
+			}
 		}
 	}
 	for _, p := range out.Packets {
@@ -207,12 +264,30 @@ func (n *Node) apply(out device.Output) {
 		n.pktOut.Add(1)
 	}
 	for _, d := range out.Datagrams {
-		if _, err := n.conn.WriteToUDPAddrPort(d.Data, d.Dst); err != nil {
-			n.writeErrs.Add(1)
+		if n.bind == nil {
+			n.writeUDP(d.Data, d.Dst)
 			continue
 		}
-		n.dgOut.Add(1)
+		for _, t := range n.bind.Route(n.now(), d.Dst, d.Data) {
+			if !t.Relay {
+				n.writeUDP(t.Data, t.Dst)
+				continue
+			}
+			if n.relaySend == nil || !n.relaySend(t.RelayTo, t.Data) {
+				n.writeErrs.Add(1)
+				continue
+			}
+			n.relayTx.Add(1)
+		}
 	}
+}
+
+func (n *Node) writeUDP(b []byte, dst netip.AddrPort) {
+	if _, err := n.conn.WriteToUDPAddrPort(b, dst); err != nil {
+		n.writeErrs.Add(1)
+		return
+	}
+	n.dgOut.Add(1)
 }
 
 func (n *Node) readUDP(ctx context.Context, out chan<- datagram, errc chan<- error) {

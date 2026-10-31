@@ -124,6 +124,7 @@ func upMesh(m *meshMode) error {
 	node, err := mesh.New(mesh.Config{
 		PrivateKey: m.privateKey, Name: m.name, Tags: m.tags,
 		CoordURL: m.coordURL, CoordFingerprint: m.coordFP, AuthKey: m.authKey,
+		RelayURL: m.relayURL, RelayFingerprint: m.relayFP,
 		StateDir: m.stateDir, Conn: conn, TUN: dev, MTU: mtu,
 		OnEvent: logEvent,
 		Logf: func(format string, args ...any) {
@@ -148,8 +149,8 @@ func upMesh(m *meshMode) error {
 		node.LocalAddr().Port(), base64.StdEncoding.EncodeToString(pub[:]))
 	err = node.Run(ctx)
 	s := node.Stats()
-	fmt.Fprintf(os.Stderr, "malla: down: datagrams in %d out %d, tun in %d out %d, write errors %d\n",
-		s.DatagramsIn, s.DatagramsOut, s.PacketsIn, s.PacketsOut, s.WriteErrors)
+	fmt.Fprintf(os.Stderr, "malla: down: datagrams in %d out %d, relay in %d out %d, tun in %d out %d, write errors %d\n",
+		s.DatagramsIn, s.DatagramsOut, s.RelayIn, s.RelayOut, s.PacketsIn, s.PacketsOut, s.WriteErrors)
 	return err
 }
 

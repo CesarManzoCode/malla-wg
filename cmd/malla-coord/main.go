@@ -27,6 +27,8 @@ type config struct {
 	AdminToken string   `json:"admin_token"`
 	AuthKeys   []string `json:"auth_keys"`
 	PolicyFile string   `json:"policy_file"`
+	// Relay is the relay URL the map announces to every node.
+	Relay string `json:"relay"`
 }
 
 func main() {
@@ -86,6 +88,7 @@ func run(path string) error {
 		AdminToken: c.AdminToken,
 		AuthKeys:   c.AuthKeys,
 		Policy:     policy,
+		Relay:      c.Relay,
 	})
 	if err != nil {
 		return err

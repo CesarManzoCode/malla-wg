@@ -19,6 +19,10 @@ const MaxEndpoints = 16
 // 10.200.0.0 + n, so the first is 10.200.0.1 and the last 10.200.255.254.
 var meshPrefix = netip.MustParsePrefix("10.200.0.0/16")
 
+// MeshPrefix is the prefix of the mesh's addresses (D18). They live on
+// the TUNs, so they are never endpoints of the underlying network.
+var MeshPrefix = meshPrefix
+
 const maxNodeID = 1<<16 - 2
 
 // CoreConfig is what Core needs besides its saved state.
