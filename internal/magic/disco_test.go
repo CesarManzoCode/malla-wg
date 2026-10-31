@@ -13,7 +13,9 @@ import (
 
 func discoKeys(t *testing.T, seed byte) (priv, pub [32]byte) {
 	t.Helper()
-	priv[0], priv[31] = seed, 0x40
+	// The seed goes in byte 1: clamping clears the low three bits of
+	// byte 0, which would map small seeds to the same scalar.
+	priv[1], priv[31] = seed, 0x40
 	return priv, x25519.PublicKey(priv)
 }
 

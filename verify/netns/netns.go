@@ -162,12 +162,14 @@ func Add(t testing.TB, names ...string) {
 
 // Veth joins namespaces nsA and nsB with a veth pair: interface ifA with
 // address addrA (prefix notation) in nsA, ifB with addrB in nsB, both up.
+// The names go after "name" and "dev", since ip(8) takes a bare name that is
+// a prefix of one of its keywords ("br" of "broadcast") as that keyword.
 func Veth(t testing.TB, nsA, ifA, addrA, nsB, ifB, addrB string) {
 	t.Helper()
-	IP(t, "link", "add", ifA, "netns", nsA, "type", "veth", "peer", "name", ifB, "netns", nsB)
+	IP(t, "link", "add", "name", ifA, "netns", nsA, "type", "veth", "peer", "name", ifB, "netns", nsB)
 	for _, side := range [][3]string{{nsA, ifA, addrA}, {nsB, ifB, addrB}} {
 		MustExec(t, side[0], "ip", "addr", "add", side[2], "dev", side[1])
-		MustExec(t, side[0], "ip", "link", "set", side[1], "up")
+		MustExec(t, side[0], "ip", "link", "set", "dev", side[1], "up")
 	}
 }
 

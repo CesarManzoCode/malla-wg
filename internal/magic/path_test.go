@@ -193,7 +193,7 @@ func TestPathFallbackAndRetry(t *testing.T) {
 	// Punching is retried every PunchRetry from the last window: a
 	// CallMeMaybe at 0, 30 s and 60 s, and nothing confirmed meanwhile.
 	direct := false
-	n.run(25e9, 65e9, func(now int64) {
+	n.run(25e9, 71e9, func(now int64) {
 		if p, _ := a.b.PathOf(now, b.key); p == PathDirect {
 			direct = true
 		}
@@ -205,11 +205,11 @@ func TestPathFallbackAndRetry(t *testing.T) {
 		t.Fatalf("a opened windows at %v, want %v", got, want)
 	}
 
-	// UDP opens at 65 s and nothing else carries traffic: the retry at
-	// 90 s finds the path.
+	// UDP opens at 71 s, after the window of 60 s closed, and nothing
+	// else carries traffic: the retry at 90 s finds the path.
 	n.blocked = false
 	at := int64(-1)
-	n.run(65e9, 91e9, func(now int64) {
+	n.run(71e9, 91e9, func(now int64) {
 		if p, _ := a.b.PathOf(now, b.key); at < 0 && p == PathDirect {
 			at = now
 		}
