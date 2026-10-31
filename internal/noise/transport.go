@@ -3,6 +3,7 @@ package noise
 import (
 	"encoding/binary"
 
+	"github.com/CesarManzoCode/malla-wg/internal/blake2s"
 	"github.com/CesarManzoCode/malla-wg/internal/chachapoly"
 )
 
@@ -20,6 +21,12 @@ type Keypair struct {
 // Sent returns the number of messages encrypted so far, which is the next
 // counter.
 func (k *Keypair) Sent() uint64 { return k.sendCounter }
+
+// KeyIDs returns the BLAKE2s-256 digests of the sending and receiving keys,
+// so that the two ends of a session can be matched without exposing them.
+func (k *Keypair) KeyIDs() (send, recv [32]byte) {
+	return blake2s.Sum256(k.send[:]), blake2s.Sum256(k.recv[:])
+}
 
 // transportNonce is 4 zero bytes followed by the 64-bit little-endian
 // counter.

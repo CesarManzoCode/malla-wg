@@ -236,6 +236,27 @@ func (d *Device) Endpoint(pub [noise.KeySize]byte) (netip.AddrPort, bool) {
 	return p.endpoint, true
 }
 
+// Session describes a keypair without its keys: SendID and RecvID are
+// digests of the sending and receiving keys (noise.Keypair.KeyIDs).
+type Session struct {
+	LocalIndex, RemoteIndex uint32
+	Initiator               bool
+	Birth                   int64
+	SendID, RecvID          [32]byte
+}
+
+// Current returns the current keypair of the peer with public key pub.
+func (d *Device) Current(pub [noise.KeySize]byte) (Session, bool) {
+	p := d.byKey[pub]
+	if p == nil || p.current == nil {
+		return Session{}, false
+	}
+	k := p.current
+	s := Session{LocalIndex: k.LocalIndex, RemoteIndex: k.RemoteIndex, Initiator: k.Initiator, Birth: k.birth}
+	s.SendID, s.RecvID = k.KeyIDs()
+	return s, true
+}
+
 // HandleUDP processes a datagram b received from src.
 func (d *Device) HandleUDP(now int64, src netip.AddrPort, b []byte) Output {
 	switch noise.MessageType(b) {
