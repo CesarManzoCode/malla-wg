@@ -142,7 +142,9 @@ func (d *Device) handleCookieReply(now int64, b []byte) {
 	}
 	if err := e.peer.noise.ConsumeCookieReply(&r, now); err != nil {
 		d.drop(e.peer, ReasonCookieReply)
+		return
 	}
+	d.event(EventCookie, e.peer, "")
 }
 
 // handleTransport decrypts a data message. Only a message that passes the

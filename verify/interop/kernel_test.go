@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"testing"
 
+	"github.com/CesarManzoCode/malla-wg/internal/device"
 	"github.com/CesarManzoCode/malla-wg/verify/netns"
 )
 
@@ -60,10 +61,14 @@ func TestCritPSKKernel(t *testing.T) {
 	})
 }
 
+// kernelEndpoint is where the kernel link of kernelSetup listens.
+var kernelEndpoint = netip.MustParseAddrPort("192.168.50.1:51820")
+
 // kernelSetup builds namespaces A<id> (kernel link wg0, 10.200.0.1) and
 // B<id> (own node, 10.200.0.2) joined by a veth on 192.168.50.0/24. Only
-// the initiating side gets the other's endpoint.
-func kernelSetup(t *testing.T, id string, ownInitiates bool, kernelPSK, ownPSK [32]byte) (*Kernel, *Own) {
+// the initiating side gets the other's endpoint; mods adjust the own
+// node's device configuration.
+func kernelSetup(t *testing.T, id string, ownInitiates bool, kernelPSK, ownPSK [32]byte, mods ...func(*device.Config)) (*Kernel, *Own) {
 	t.Helper()
 	a, b := "A"+id, "B"+id
 	netns.Add(t, a, b)
@@ -72,14 +77,14 @@ func kernelSetup(t *testing.T, id string, ownInitiates bool, kernelPSK, ownPSK [
 	oPriv, oPub := newKeypair(t)
 	var kEnd, oEnd netip.AddrPort
 	if ownInitiates {
-		oEnd = netip.MustParseAddrPort("192.168.50.1:51820")
+		oEnd = kernelEndpoint
 	} else {
 		kEnd = netip.MustParseAddrPort("192.168.50.2:51820")
 	}
 	k := NewKernel(t, a, "wg0", "10.200.0.1/24", kPriv, 51820,
 		KernelPeer(oPub, kernelPSK, netip.MustParsePrefix("10.200.0.2/32"), kEnd))
 	o := NewOwnNetns(t, b, "10.200.0.2/24", 51820, oPriv,
-		OwnPeer(kPub, ownPSK, netip.MustParsePrefix("10.200.0.1/32"), oEnd))
+		OwnPeer(kPub, ownPSK, netip.MustParsePrefix("10.200.0.1/32"), oEnd), mods...)
 	return k, o
 }
 

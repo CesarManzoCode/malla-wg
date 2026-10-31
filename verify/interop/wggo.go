@@ -12,6 +12,7 @@ import (
 	"golang.zx2c4.com/wireguard/conn"
 	wgdevice "golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun/netstack"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 // WGGo is a wireguard-go device in this process, on a tun/netstack TUN and
@@ -21,6 +22,8 @@ type WGGo struct {
 	Net  *netstack.Net
 	Addr netip.Addr // tunnel address
 	Port uint16
+	// Public is the static public key, derived with wgtypes.
+	Public [32]byte
 }
 
 // NewWGGo starts wireguard-go with one peer until t ends; an invalid
@@ -44,7 +47,7 @@ func NewWGGo(t testing.TB, priv [32]byte, addr netip.Addr, peerPub, psk [32]byte
 	if err := dev.Up(); err != nil {
 		t.Fatalf("wireguard-go up: %v", err)
 	}
-	w := &WGGo{Dev: dev, Net: tnet, Addr: addr}
+	w := &WGGo{Dev: dev, Net: tnet, Addr: addr, Public: wgtypes.Key(priv).PublicKey()}
 	port, err := strconv.ParseUint(w.field("listen_port"), 10, 16)
 	if err != nil || port == 0 {
 		t.Fatalf("wireguard-go listen_port: %q %v", w.field("listen_port"), err)

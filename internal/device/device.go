@@ -89,6 +89,7 @@ const (
 	EventEndpoint                       // the peer's endpoint changed to Endpoint
 	EventRekey                          // an initiation was sent; Reason says why
 	EventDrop                           // something was dropped; Reason says why
+	EventCookie                         // a cookie reply was accepted; the next initiation or response carries mac2
 )
 
 func (k EventKind) String() string {
@@ -101,6 +102,8 @@ func (k EventKind) String() string {
 		return "rekey"
 	case EventDrop:
 		return "drop"
+	case EventCookie:
+		return "cookie"
 	}
 	return fmt.Sprintf("EventKind(%d)", uint8(k))
 }

@@ -1,5 +1,5 @@
 // Package interop holds the interoperability tests of the contract §7
-// (criteria 5 to 8): the own node (internal/runtime) against the Linux
+// (criteria 5 to 10): the own node (internal/runtime) against the Linux
 // kernel's WireGuard, configured with wgctrl inside a namespace built by
 // verify/netns, and against wireguard-go running in this process on
 // tun/netstack over 127.0.0.1, without privileges.
@@ -8,6 +8,7 @@ package interop
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/CesarManzoCode/malla-wg/internal/device"
+	"github.com/CesarManzoCode/malla-wg/internal/noise"
 	"github.com/CesarManzoCode/malla-wg/internal/runtime"
 	"github.com/CesarManzoCode/malla-wg/internal/tun"
 )
@@ -53,6 +55,46 @@ func (e *Events) Last() string {
 	return ev.Kind.String() + " " + ev.Reason
 }
 
+// Count returns how many events of kind with reason were recorded; an
+// empty reason matches any.
+func (e *Events) Count(kind device.EventKind, reason string) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	n := 0
+	for _, ev := range e.list {
+		if ev.Kind == kind && (reason == "" || ev.Reason == reason) {
+			n++
+		}
+	}
+	return n
+}
+
+// Index returns the position of the first event of kind with reason (empty
+// matches any) at or after from, or -1.
+func (e *Events) Index(kind device.EventKind, reason string, from int) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for i := max(from, 0); i < len(e.list); i++ {
+		if ev := e.list[i]; ev.Kind == kind && (reason == "" || ev.Reason == reason) {
+			return i
+		}
+	}
+	return -1
+}
+
+// Wait polls until an event of kind with reason (empty matches any) is
+// recorded or timeout passes, and reports whether one was.
+func (e *Events) Wait(kind device.EventKind, reason string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for e.Count(kind, reason) == 0 {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return true
+}
+
 // Handshake returns the reason ("initiator" or "responder") of the first
 // handshake event, and whether there was one.
 func (e *Events) Handshake() (string, bool) {
@@ -81,12 +123,20 @@ func OwnPeer(pub, psk [32]byte, allowed netip.Prefix, endpoint netip.AddrPort) d
 	return device.PeerConfig{PublicKey: pub, PresharedKey: psk, AllowedIPs: []netip.Prefix{allowed}, Endpoint: endpoint}
 }
 
-// startOwn runs a node on conn and dev until t ends.
-func startOwn(t testing.TB, priv [32]byte, addr netip.Addr, peer device.PeerConfig, conn *net.UDPConn, dev tun.Device) *Own {
+// UnderLoad makes the own node behave as under load (ForceUnderLoad).
+func UnderLoad(c *device.Config) { c.ForceUnderLoad = true }
+
+// startOwn runs a node on conn and dev until t ends; mods adjust its
+// device configuration.
+func startOwn(t testing.TB, priv [32]byte, addr netip.Addr, peer device.PeerConfig, conn *net.UDPConn, dev tun.Device, mods ...func(*device.Config)) *Own {
 	t.Helper()
 	o := &Own{Events: &Events{}, Addr: addr}
+	cfg := device.Config{PrivateKey: priv, Peers: []device.PeerConfig{peer}}
+	for _, mod := range mods {
+		mod(&cfg)
+	}
 	node, err := runtime.New(runtime.Config{
-		Device:  device.Config{PrivateKey: priv, Peers: []device.PeerConfig{peer}},
+		Device:  cfg,
 		Conn:    conn,
 		TUN:     dev,
 		OnEvent: o.Events.add,
@@ -112,14 +162,14 @@ func startOwn(t testing.TB, priv [32]byte, addr netip.Addr, peer device.PeerConf
 // NewOwnMem runs an own node on 127.0.0.1 (a free port) with an in-memory
 // TUN. A responder answers the ICMP echo requests sent to addr and hands
 // the replies to Ping.
-func NewOwnMem(t testing.TB, priv [32]byte, addr netip.Addr, peer device.PeerConfig) *Own {
+func NewOwnMem(t testing.TB, priv [32]byte, addr netip.Addr, peer device.PeerConfig, mods ...func(*device.Config)) *Own {
 	t.Helper()
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	mem := tun.NewMem("mem0", 256)
-	o := startOwn(t, priv, addr, peer, conn, mem)
+	o := startOwn(t, priv, addr, peer, conn, mem, mods...)
 	o.mem, o.echoes = mem, make(chan []byte, 16)
 	stop := make(chan struct{})
 	t.Cleanup(func() { close(stop) })
@@ -155,6 +205,15 @@ func (o *Own) answer(stop <-chan struct{}) {
 	}
 }
 
+// Send injects one echo request with sequence 0 to dst into the in-memory
+// TUN without waiting for its reply.
+func (o *Own) Send(dst netip.Addr) error {
+	if o.mem == nil {
+		return errors.New("interop: Send needs an in-memory TUN")
+	}
+	return o.mem.Inject(ipv4Packet(o.Addr, dst, icmpEcho(8, 0x6d61, 0, pingData)))
+}
+
 // Ping sends up to tries echo requests from the in-memory TUN to dst and
 // returns nil at the first reply.
 func (o *Own) Ping(dst netip.Addr, tries int) error {
@@ -184,6 +243,81 @@ func (o *Own) Ping(dst netip.Addr, tries int) error {
 // isReply reports whether msg is the echo reply to request seq.
 func isReply(msg []byte, seq uint16) bool {
 	return len(msg) >= 8 && msg[0] == 0 && binary.BigEndian.Uint16(msg[6:]) == seq && bytes.Equal(msg[8:], pingData)
+}
+
+// CookieRetry checks the own node's events as initiator against a peer
+// under load: an accepted cookie reply, then a new initiation (which
+// carries mac2, since the cookie is fresh), then the handshake.
+func CookieRetry(o *Own) error {
+	c := o.Events.Index(device.EventCookie, "", 0)
+	if c < 0 {
+		return errors.New("no cookie reply was accepted")
+	}
+	r := o.Events.Index(device.EventRekey, "", c)
+	if r < 0 {
+		return errors.New("no initiation after the cookie reply")
+	}
+	if o.Events.Index(device.EventHandshake, "initiator", r) < 0 {
+		return errors.New("no handshake as initiator after the initiation with mac2")
+	}
+	return nil
+}
+
+// FloodSize is the number of initiations of a flood (contract §6, cookies
+// under load), sent within one second.
+const FloodSize = 4096
+
+// FloodInitiation returns a serialized initiation to the static key target
+// from a fresh key that target does not know. Its mac1, computed by
+// internal/noise, is valid, so target spends a DH on it unless it is under
+// load, in which case it answers with a cookie reply.
+func FloodInitiation(t testing.TB, target [32]byte) []byte {
+	t.Helper()
+	var priv [32]byte
+	if _, err := rand.Read(priv[:]); err != nil {
+		t.Fatal(err)
+	}
+	p, err := noise.NewLocal(priv).NewPeer(target, [32]byte{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := p.CreateInitiation(rand.Reader, 0, time.Now().UnixNano(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := m.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// Flood sends FloodSize copies of msg to dst, split evenly across conns
+// that send in parallel, and returns how long the sending took. The first
+// sender calls trigger once, halfway through its share, so that what
+// trigger sends meets a full handshake queue. Send errors fail t.
+func Flood(t testing.TB, conns []*net.UDPConn, dst netip.AddrPort, msg []byte, trigger func()) time.Duration {
+	t.Helper()
+	share := FloodSize / len(conns)
+	var wg sync.WaitGroup
+	start := time.Now()
+	for i, c := range conns {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range share {
+				if i == 0 && j == share/2 {
+					trigger()
+				}
+				if _, err := c.WriteToUDPAddrPort(msg, dst); err != nil {
+					t.Errorf("flood sender %d, datagram %d: %v", i, j, err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return time.Since(start)
 }
 
 // Failure formats what a failed run reports (contract §7, k1-07): who

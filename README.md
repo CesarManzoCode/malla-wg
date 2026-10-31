@@ -14,7 +14,7 @@ El diseño y las decisiones están en [`vault/CONTRACT.md`](vault/CONTRACT.md), 
 | Fase | Contenido | Estado |
 | --- | --- | --- |
 | K0 | Fundación: contrato, investigación, plan | Hecha |
-| K1 | Criptografía, protocolo WireGuard, simulador base, interoperabilidad con el kernel y wireguard-go, plano de datos | Pendiente |
+| K1 | Criptografía, protocolo WireGuard, simulador base, interoperabilidad con el kernel y wireguard-go, plano de datos | Implementada, pendiente de cierre |
 | K2 | Coordinación y políticas, relay HTTPS, descubrimiento y hole punching, elección de camino, migración, CLI | Pendiente |
 | K3 | Matriz de NAT (teoría, simulador, NATs reales), mutantes, conteo de líneas, dependencias, suite sin permisos | Pendiente |
 

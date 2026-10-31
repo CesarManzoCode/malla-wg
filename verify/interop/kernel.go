@@ -72,6 +72,15 @@ func (k *Kernel) Peer() (wgtypes.Peer, error) {
 	return d.Peers[0], nil
 }
 
+// PublicKey reads the link's static public key.
+func (k *Kernel) PublicKey() ([32]byte, error) {
+	d, err := k.client.Device(k.Iface)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return d.PublicKey, nil
+}
+
 // State describes the kernel's peer as wgctrl reads it.
 func (k *Kernel) State() string {
 	p, err := k.Peer()
@@ -83,7 +92,7 @@ func (k *Kernel) State() string {
 
 // NewOwnNetns runs an own node in ns on a Linux TUN named malla0 with
 // address addr (prefix notation, MTU 1420) and a UDP socket on port.
-func NewOwnNetns(t testing.TB, ns, addr string, port int, priv [32]byte, peer device.PeerConfig) *Own {
+func NewOwnNetns(t testing.TB, ns, addr string, port int, priv [32]byte, peer device.PeerConfig, mods ...func(*device.Config)) *Own {
 	t.Helper()
 	prefix := netip.MustParsePrefix(addr)
 	var conn *net.UDPConn
@@ -99,7 +108,7 @@ func NewOwnNetns(t testing.TB, ns, addr string, port int, priv [32]byte, peer de
 	}); err != nil {
 		t.Fatalf("own node in %s: %v", ns, err)
 	}
-	o := startOwn(t, priv, prefix.Addr(), peer, conn, dev)
+	o := startOwn(t, priv, prefix.Addr(), peer, conn, dev, mods...)
 	netns.MustExec(t, ns, "ip", "addr", "add", addr, "dev", "malla0")
 	netns.MustExec(t, ns, "ip", "link", "set", "malla0", "mtu", "1420", "up")
 	return o

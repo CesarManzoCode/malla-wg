@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+
+	"github.com/CesarManzoCode/malla-wg/internal/device"
 )
 
 var (
@@ -56,17 +58,18 @@ func TestCritPSKWireGuardGo(t *testing.T) {
 }
 
 // wggoSetup starts wireguard-go (10.200.0.1) and the own node (10.200.0.2)
-// on 127.0.0.1; only the initiating side gets the other's endpoint.
-func wggoSetup(t *testing.T, ownInitiates bool, wgPSK, ownPSK [32]byte) (*WGGo, *Own) {
+// on 127.0.0.1; only the initiating side gets the other's endpoint. mods
+// adjust the own node's device configuration.
+func wggoSetup(t *testing.T, ownInitiates bool, wgPSK, ownPSK [32]byte, mods ...func(*device.Config)) (*WGGo, *Own) {
 	t.Helper()
 	wPriv, wPub := newKeypair(t)
 	oPriv, oPub := newKeypair(t)
 	wgPrefix, ownPrefix := netip.PrefixFrom(wgAddr, 32), netip.PrefixFrom(ownAddr, 32)
 	if ownInitiates {
 		w := NewWGGo(t, wPriv, wgAddr, oPub, wgPSK, ownPrefix, netip.AddrPort{})
-		return w, NewOwnMem(t, oPriv, ownAddr, OwnPeer(wPub, ownPSK, wgPrefix, w.Endpoint()))
+		return w, NewOwnMem(t, oPriv, ownAddr, OwnPeer(wPub, ownPSK, wgPrefix, w.Endpoint()), mods...)
 	}
-	o := NewOwnMem(t, oPriv, ownAddr, OwnPeer(wPub, ownPSK, wgPrefix, netip.AddrPort{}))
+	o := NewOwnMem(t, oPriv, ownAddr, OwnPeer(wPub, ownPSK, wgPrefix, netip.AddrPort{}), mods...)
 	return NewWGGo(t, wPriv, wgAddr, oPub, wgPSK, ownPrefix, o.Node.LocalAddr()), o
 }
 

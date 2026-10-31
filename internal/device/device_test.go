@@ -146,6 +146,15 @@ func TestCookieUnderLoad(t *testing.T) {
 	if cookies != 1 || len(b.tun) != 0 {
 		t.Fatalf("b sent %d cookie replies and received %d packets, want 1 and 0", cookies, len(b.tun))
 	}
+	var accepted int
+	for _, e := range a.events {
+		if e.Kind == EventCookie {
+			accepted++
+		}
+	}
+	if accepted != 1 {
+		t.Fatalf("a reported %d accepted cookie replies, want 1", accepted)
+	}
 	l.runUntil(6 * sec)
 	if len(b.tun) != 1 {
 		t.Fatalf("retried initiation with mac2 did not complete the handshake")
