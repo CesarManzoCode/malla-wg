@@ -1,0 +1,15 @@
+{
+ "source": "RFC 7693, https://www.rfc-editor.org/rfc/rfc7693.txt",
+ "note": "Transcribed from the RFC text; byte strings in hex. appendix_e holds the parameters and the grand hash of blake2s_selftest().",
+ "appendix_b": {
+  "name": "RFC 7693 Appendix B",
+  "input": "616263",
+  "digest": "508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982"
+ },
+ "appendix_e": {
+  "name": "RFC 7693 Appendix E blake2s_selftest",
+  "md_len": [16, 20, 28, 32],
+  "in_len": [0, 3, 64, 65, 255, 1024],
+  "result": "6a411f08ce25adcdfb02aba641451cec53c598b24f4fc787fbdc88797f4c1dfe"
+ }
+}
