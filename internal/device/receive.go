@@ -83,6 +83,10 @@ func (d *Device) handleInitiation(now int64, src netip.AddrPort, b []byte) {
 	d.sessionDerived(now, p)
 	d.event(EventHandshake, p, "responder")
 
+	// A response counts as a sent handshake for the REKEY_TIMEOUT limit,
+	// as in the kernel's and wireguard-go's SendHandshakeResponse: without
+	// it two peers whose initiations cross keep crossing in phase.
+	p.lastHandshake, p.sentHandshake = now, true
 	rb, _ := r.MarshalBinary()
 	d.send(p.endpoint, rb)
 	d.anyAuthenticatedPacketTraversal(now, p)

@@ -94,16 +94,20 @@ func (w *WGGo) State() string {
 	return b.String()
 }
 
-// Ping sends up to tries echo requests from netstack (a ping4 socket) to
-// dst and returns nil at the first reply.
+// Ping sends up to tries echo requests from netstack to dst and returns nil
+// at the first reply. Each request has its own ping4 socket, kept open
+// until Ping returns so no two share an ICMP identifier: netstack's
+// PingConn.Read waits for a fresh readiness notification, so replies that
+// arrive together (requests staged until a handshake completes) would
+// leave the rest queued behind stale ones on a shared socket.
 func (w *WGGo) Ping(dst netip.Addr, tries int) error {
-	pc, err := w.Net.DialPingAddr(w.Addr, dst)
-	if err != nil {
-		return err
-	}
-	defer pc.Close()
 	buf := make([]byte, 1500)
 	for seq := 1; seq <= tries; seq++ {
+		pc, err := w.Net.DialPingAddr(w.Addr, dst)
+		if err != nil {
+			return err
+		}
+		defer pc.Close()
 		pc.SetDeadline(time.Now().Add(pingTimeout))
 		if _, err := pc.Write(icmpEcho(8, 0, uint16(seq), pingData)); err != nil {
 			return err

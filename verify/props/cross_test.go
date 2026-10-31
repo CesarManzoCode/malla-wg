@@ -41,7 +41,9 @@ type crossResult struct {
 
 // crossScenario runs the crossed-handshake scenario of seed: both devices
 // start within 50 ms of each other with a packet for the other, so both
-// initiate, and keep sending one packet every 250 ms until 55 s.
+// initiate, and keep sending one packet every 250 ms until 55 s. A device
+// starts by binding its port: datagrams that arrive earlier are dropped
+// (no_port), so neither can complete a handshake before its own start.
 func crossScenario(t *testing.T, seed uint64) *crossResult {
 	t.Helper()
 	var buf bytes.Buffer
@@ -66,25 +68,30 @@ func crossScenario(t *testing.T, seed uint64) *crossResult {
 		t.Fatal(err)
 	}
 	r := &crossResult{pubA: noise.NewLocal(privA).PublicKey(), pubB: noise.NewLocal(privB).PublicKey()}
-	r.a, err = sim.AttachDevice(ha, crossPort, device.Config{PrivateKey: privA, WallOffset: crossWall,
-		Peers: []device.PeerConfig{{PublicKey: r.pubB, AllowedIPs: []netip.Prefix{netip.PrefixFrom(innerB, 32)}, Endpoint: hb.AddrPort(crossPort)}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.b, err = sim.AttachDevice(hb, crossPort, device.Config{PrivateKey: privB, WallOffset: crossWall + 11e9,
-		Peers: []device.PeerConfig{{PublicKey: r.pubA, AllowedIPs: []netip.Prefix{netip.PrefixFrom(innerA, 32)}, Endpoint: ha.AddrPort(crossPort)}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.a.OnTUN = func(p []byte) { r.lateA += late(p) }
-	r.b.OnTUN = func(p []byte) { r.lateB += late(p) }
-	traffic(s, r.a, startA, innerA, innerB)
-	traffic(s, r.b, startB, innerB, innerA)
+	boot(t, s, &r.a, &r.lateA, startA, ha, device.Config{PrivateKey: privA, WallOffset: crossWall,
+		Peers: []device.PeerConfig{{PublicKey: r.pubB, AllowedIPs: []netip.Prefix{netip.PrefixFrom(innerB, 32)}, Endpoint: hb.AddrPort(crossPort)}}},
+		innerA, innerB)
+	boot(t, s, &r.b, &r.lateB, startB, hb, device.Config{PrivateKey: privB, WallOffset: crossWall + 11e9,
+		Peers: []device.PeerConfig{{PublicKey: r.pubA, AllowedIPs: []netip.Prefix{netip.PrefixFrom(innerA, 32)}, Endpoint: ha.AddrPort(crossPort)}}},
+		innerB, innerA)
 	if err := s.RunUntil(crossDeadline); err != nil {
 		t.Fatal(err)
 	}
 	r.log = buf.Bytes()
 	return r
+}
+
+// boot starts a device from cfg on h at start, stores it in *n, counts
+// its late packets in *late and schedules its traffic from src to dst.
+func boot(t *testing.T, s *sim.Sim, n **sim.DeviceNode, late *int, start int64, h *sim.Host, cfg device.Config, src, dst netip.Addr) {
+	s.At(start, func() {
+		var err error
+		if *n, err = sim.AttachDevice(h, crossPort, cfg); err != nil {
+			t.Fatal(err)
+		}
+		(*n).OnTUN = func(p []byte) { *late += latePacket(p) }
+		traffic(s, *n, start, src, dst)
+	})
 }
 
 // traffic schedules n's packets from src to dst, each carrying its send
@@ -97,7 +104,7 @@ func traffic(s *sim.Sim, n *sim.DeviceNode, start int64, src, dst netip.Addr) {
 	}
 }
 
-func late(pkt []byte) int {
+func latePacket(pkt []byte) int {
 	if len(pkt) >= 28 && int64(binary.BigEndian.Uint64(pkt[20:28])) >= crossLateFrom {
 		return 1
 	}

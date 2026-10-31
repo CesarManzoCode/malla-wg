@@ -43,7 +43,7 @@ type result struct {
 func summarize(r io.Reader, w io.Writer) int {
 	results := map[string]*result{}
 	var order []string
-	pkgFailed, failed, otherSkip, privSkip, total := false, 0, 0, 0, 0
+	pkgFailed, failed, otherSkip, privSkip := false, 0, 0, 0
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 1<<20), 1<<24)
 	for sc.Scan() {
@@ -76,7 +76,6 @@ func summarize(r io.Reader, w io.Writer) int {
 			}
 		case "pass", "fail", "skip":
 			res.action = e.Action
-			total++
 			fmt.Fprintf(w, "%s %s\n", e.Test, e.Action)
 			switch {
 			case e.Action == "fail":
@@ -99,7 +98,7 @@ func summarize(r io.Reader, w io.Writer) int {
 		}
 	}
 	switch {
-	case total == 0:
+	case len(order) == 0: // a test that started and never finished ran
 		fmt.Fprintln(w, "critrun: no tests ran")
 		return 1
 	case failed > 0 || otherSkip > 0 || pkgFailed:

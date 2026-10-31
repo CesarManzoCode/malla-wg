@@ -46,10 +46,10 @@ type peer struct {
 
 	staged [][]byte
 
-	lastInitiation int64 // now of the last initiation sent
-	sentInitiation bool
-	attemptStart   int64 // now of the first initiation of the attempt
-	lastMinute     bool  // the receive-side rekey was sent for current
+	lastHandshake int64 // now of the last initiation or response sent
+	sentHandshake bool
+	attemptStart  int64 // now of the first initiation of the attempt
+	lastMinute    bool  // the receive-side rekey was sent for current
 
 	needAnotherKeepalive bool
 

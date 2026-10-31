@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/CesarManzoCode/malla-wg/internal/noise"
 	"github.com/CesarManzoCode/malla-wg/internal/runtime"
 	"github.com/CesarManzoCode/malla-wg/internal/tun"
+	"golang.org/x/net/ipv4"
 )
 
 // pingTimeout is how long one echo request waits for its reply, like
@@ -292,32 +294,125 @@ func FloodInitiation(t testing.TB, target [32]byte) []byte {
 	return b
 }
 
+// floodPause is how long the senders of a flood stop halfway through. It
+// lets the receiver drain its handshake queue, which in wireguard-go holds
+// 1024 entries, fewer than a flood, while it stays under load: the kernel
+// and wireguard-go keep that state for 1 s after they last detect it.
+const floodPause = 50 * time.Millisecond
+
+// floodBatch is how many datagrams a flood sender passes to one sendmmsg
+// call. One datagram per call is too slow for the kernel's handshake
+// queue to reach the 512 entries that put it under load.
+const floodBatch = 64
+
+// floodAttempts is how many floods UnderLoadAttempts tries, floodGap
+// apart, before failing because none put the oracle under load.
+const (
+	floodAttempts = 10
+	floodGap      = time.Second
+)
+
 // Flood sends FloodSize copies of msg to dst, split evenly across conns
-// that send in parallel, and returns how long the sending took. The first
-// sender calls trigger once, halfway through its share, so that what
-// trigger sends meets a full handshake queue. Send errors fail t.
-func Flood(t testing.TB, conns []*net.UDPConn, dst netip.AddrPort, msg []byte, trigger func()) time.Duration {
+// that start together and send in parallel, and returns how long the
+// sending took and whether the receiver was under load halfway through.
+// Halfway through its share each sender waits for the others and, for
+// floodPause, counts the cookie replies its socket gets: a receiver
+// answers with a cookie only under load. If some arrived, the first
+// sender calls trigger, which must return once what it starts has been
+// sent; then all of them send the second half. What trigger sends thus
+// reaches a receiver under load with room in its queue: wireguard-go
+// drops what arrives at a full one, and a retry 5 s later would find it
+// no longer under load. Send errors fail t.
+func Flood(t testing.TB, conns []*net.UDPConn, dst netip.AddrPort, msg []byte, trigger func()) (took time.Duration, loaded bool) {
 	t.Helper()
 	share := FloodSize / len(conns)
-	var wg sync.WaitGroup
-	start := time.Now()
+	var wg, ready, half, counted sync.WaitGroup
+	ready.Add(len(conns))
+	half.Add(len(conns))
+	counted.Add(len(conns))
+	var cookies atomic.Int64
+	begin, resume := make(chan struct{}), make(chan struct{})
 	for i, c := range conns {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for j := range share {
-				if i == 0 && j == share/2 {
+			pc, batch := ipv4.NewPacketConn(c), make([]ipv4.Message, floodBatch)
+			for k := range batch {
+				batch[k] = ipv4.Message{Buffers: [][]byte{msg}, Addr: net.UDPAddrFromAddrPort(dst)}
+			}
+			ready.Done()
+			<-begin
+			send := func(n int) bool {
+				for n > 0 {
+					m, err := pc.WriteBatch(batch[:min(n, len(batch))], 0)
+					if err != nil {
+						t.Errorf("flood sender %d: %v", i, err)
+						return false
+					}
+					n -= m
+				}
+				return true
+			}
+			ok := send(share / 2)
+			half.Done()
+			half.Wait()
+			cookies.Add(int64(countCookies(c, time.Now().Add(floodPause))))
+			counted.Done()
+			if i == 0 {
+				counted.Wait()
+				if loaded = cookies.Load() > 0; loaded {
 					trigger()
 				}
-				if _, err := c.WriteToUDPAddrPort(msg, dst); err != nil {
-					t.Errorf("flood sender %d, datagram %d: %v", i, j, err)
-					return
-				}
+				close(resume)
+			}
+			<-resume
+			if ok {
+				send(share - share/2)
 			}
 		}()
 	}
+	ready.Wait()
+	start := time.Now()
+	close(begin)
 	wg.Wait()
-	return time.Since(start)
+	return time.Since(start), loaded
+}
+
+// countCookies reads c until deadline and returns how many cookie replies
+// it got.
+func countCookies(c *net.UDPConn, deadline time.Time) int {
+	defer c.SetReadDeadline(time.Time{})
+	c.SetReadDeadline(deadline)
+	buf := make([]byte, 1500)
+	n := 0
+	for {
+		m, err := c.Read(buf)
+		if err != nil {
+			return n
+		}
+		if noise.MessageType(buf[:m]) == noise.TypeCookieReply {
+			n++
+		}
+	}
+}
+
+// UnderLoadAttempts runs attempt, each time in a subtest of its own and
+// floodGap after the previous one, until it reports that its flood put
+// the oracle under load, at most floodAttempts times. An attempt whose
+// flood did not says nothing about the own node, since a receiver that is
+// not under load sends no cookie; an attempt that fails ends the loop.
+func UnderLoadAttempts(t *testing.T, attempt func(t *testing.T, n int) (loaded bool)) {
+	t.Helper()
+	for n := 1; n <= floodAttempts; n++ {
+		if n > 1 {
+			time.Sleep(floodGap)
+		}
+		loaded := false
+		if ok := t.Run(fmt.Sprintf("attempt-%d", n), func(t *testing.T) { loaded = attempt(t, n) }); !ok || loaded {
+			return
+		}
+	}
+	t.Fatalf("none of %d floods of %d initiations put the oracle under load", floodAttempts, FloodSize)
 }
 
 // Failure formats what a failed run reports (contract §7, k1-07): who

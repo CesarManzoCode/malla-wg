@@ -90,7 +90,7 @@ func (d *Device) sendInitiation(now int64, p *peer, retry bool, reason string) {
 	if !p.endpoint.IsValid() {
 		return
 	}
-	if p.sentInitiation && now-p.lastInitiation < RekeyTimeout {
+	if p.sentHandshake && now-p.lastHandshake < RekeyTimeout {
 		return
 	}
 	idx, ok := d.newIndex()
@@ -105,7 +105,7 @@ func (d *Device) sendInitiation(now int64, p *peer, retry bool, reason string) {
 	d.dropHandshakeIndex(p)
 	d.indices[idx] = indexEntry{peer: p}
 	p.hsIndex, p.hsPending = idx, true
-	p.lastInitiation, p.sentInitiation = now, true
+	p.lastHandshake, p.sentHandshake = now, true
 
 	b, _ := m.MarshalBinary()
 	d.send(p.endpoint, b)
