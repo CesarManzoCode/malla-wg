@@ -15,7 +15,7 @@ El diseño y las decisiones están en [`vault/CONTRACT.md`](vault/CONTRACT.md), 
 | --- | --- | --- |
 | K0 | Fundación: contrato, investigación, plan | Hecha |
 | K1 | Criptografía, protocolo WireGuard, simulador base, interoperabilidad con el kernel y wireguard-go, plano de datos | Cerrada |
-| K2 | Coordinación y políticas, relay HTTPS, descubrimiento y hole punching, elección de camino, migración, CLI | Pendiente |
+| K2 | Coordinación y políticas, relay HTTPS, descubrimiento y hole punching, elección de camino, migración, CLI | Implementada, pendiente de cierre |
 | K3 | Matriz de NAT (teoría, simulador, NATs reales), mutantes, conteo de líneas, dependencias, suite sin permisos | Pendiente |
 
 ## Resultados
@@ -53,3 +53,11 @@ make check
 ```
 
 Corre formato, `go vet` y las pruebas en modo corto. Las pruebas que necesitan espacios de red no usan sudo: entran en un espacio de usuario sin privilegios y se saltan si el sistema no lo permite.
+
+Un nodo de la malla se levanta con `malla up -config node.json` y abre un socket de control en `state_dir/control.sock`. Con el nodo corriendo:
+
+```
+malla status -config node.json            # una línea por par: <nombre> <addr> direct|relay <endpoint>
+malla status -json -config node.json
+malla wait-direct -peer b -timeout 30s -config node.json   # 0 al lograr camino directo, 1 al vencer el plazo
+```

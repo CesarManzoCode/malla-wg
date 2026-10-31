@@ -1,9 +1,9 @@
 // Package magic sits between the WireGuard device and the network and
 // decides, peer by peer, where each encrypted datagram goes: straight to a
-// UDP address (direct) or through the relay. It holds the bind, the choice
-// between a confirmed direct address and the relay, disco (disco.go) and
-// hole punching (punch.go); path choice by RTT and the migration rules of
-// contract §3.3 come on top of it.
+// UDP address (direct) or through the relay. It holds the bind, disco
+// (disco.go), hole punching (punch.go) and the path choice of contract
+// §3.3 (path.go): the confirmed direct address of lowest RTT, else the
+// relay.
 //
 // The device never sees a real address of a peer the bind manages: it
 // gets a pseudo endpoint, unique per peer, and the bind translates both
@@ -29,7 +29,7 @@ import (
 const Never int64 = math.MaxInt64
 
 // DirectTimeout is how long a direct address stays confirmed after the
-// last datagram received from it (the 5 s of contract §3.3).
+// last pong received from it (the 5 s of contract §3.3).
 const DirectTimeout int64 = 5e9
 
 // ProbeInterval spaces the transport datagrams that, while the relay
@@ -81,10 +81,11 @@ type peerState struct {
 	// sources of pings.
 	candidates []netip.AddrPort
 	learned    []netip.AddrPort
-	// direct is the address the peer was last heard from by UDP, and
-	// heard when; it is confirmed for DirectTimeout after that.
+	// direct is the address last confirmed. paths are the confirmed
+	// direct addresses with when and how fast (path.go); each stays
+	// confirmed for DirectTimeout.
 	direct    netip.AddrPort
-	heard     int64
+	paths     []directPath
 	lastProbe int64
 	probed    bool
 	// rtt is the round trip of the ping whose pong last confirmed direct.
@@ -103,6 +104,17 @@ type peerState struct {
 	punchUntil   int64
 	nextPing     int64
 	pings        map[[12]byte]pingSent
+	// punched is set once a window opened, at lastPunch; without a
+	// confirmed path the next one opens PunchRetry later.
+	punched   bool
+	lastPunch int64
+	// nextBeat is when the heartbeat pings the confirmed paths again.
+	nextBeat int64
+	// probe is an address a WireGuard datagram came from while the peer
+	// had no confirmed path; the next Tick pings it, not before
+	// nextProbe.
+	probe     netip.AddrPort
+	nextProbe int64
 }
 
 type pingSent struct {
@@ -243,7 +255,7 @@ func (b *Bind) Pseudo(key [noise.KeySize]byte) (netip.AddrPort, bool) {
 }
 
 // SetCandidates replaces the direct candidates of the peer with key. The
-// address the peer was last heard from and the learned ones stay, since
+// address last confirmed and the learned ones stay, since
 // they were measured. A candidate the peer did not have starts a hole
 // punching window at the next Tick.
 func (b *Bind) SetCandidates(key [noise.KeySize]byte, candidates []netip.AddrPort) {
@@ -312,15 +324,24 @@ func (b *Bind) RelayUp() bool { return b.relayUp }
 // DiscoUDP instead.
 //
 // For a peer without disco a WireGuard datagram confirms src as its
-// direct address. With disco only a pong confirms one, and a WireGuard
-// datagram from the confirmed address keeps it confirmed.
+// direct address. With disco only a pong confirms one: a WireGuard
+// datagram from a candidate while the peer has no confirmed path (the
+// peer's probe copies, say, once the UDP path opens) only makes the next
+// Tick ping src.
 func (b *Bind) FromUDP(now int64, src netip.AddrPort, data []byte) netip.AddrPort {
 	p := b.byAddr[src]
 	if p == nil {
 		return src
 	}
-	if noise.MessageType(data) != 0 && (!b.discoReady(p) || (src == p.direct && p.confirmed(now))) {
-		p.direct, p.heard = src, now
+	if noise.MessageType(data) == 0 {
+		return p.pseudo
+	}
+	if !b.discoReady(p) {
+		p.confirmAddr(now, src, unknownRTT)
+		return p.pseudo
+	}
+	if !p.confirmed(now) && !p.punching(now) && now >= p.nextProbe {
+		p.probe = src
 	}
 	return p.pseudo
 }
@@ -348,25 +369,22 @@ func (b *Bind) Roamed(now int64, key [noise.KeySize]byte, ep netip.AddrPort) (ne
 	if IsPseudo(ep) {
 		return p.pseudo, true
 	}
-	p.direct, p.heard = ep, now
+	p.confirmAddr(now, ep, unknownRTT)
 	b.reindex(p)
 	return p.pseudo, true
-}
-
-// confirmed reports whether p's direct address is confirmed at now.
-func (p *peerState) confirmed(now int64) bool {
-	return p.direct.IsValid() && now-p.heard < DirectTimeout
 }
 
 // PathOf returns how the peer with key is reached at now, and the direct
 // address when the path is direct.
 func (b *Bind) PathOf(now int64, key [noise.KeySize]byte) (Path, netip.AddrPort) {
 	p := b.byKey[key]
-	switch {
-	case p == nil:
+	if p == nil {
 		return PathNone, netip.AddrPort{}
-	case p.confirmed(now):
-		return PathDirect, p.direct
+	}
+	if a, ok := p.best(now); ok {
+		return PathDirect, a
+	}
+	switch {
 	case b.relayUp:
 		return PathRelay, netip.AddrPort{}
 	case p.direct.IsValid():
@@ -381,11 +399,12 @@ func (b *Bind) PathOf(now int64, key [noise.KeySize]byte) (Path, netip.AddrPort)
 // the network. A dst that is no pseudo endpoint (a cookie reply to an
 // unknown address, say) goes out by UDP unchanged. For a peer:
 //
-//   - with a confirmed direct address, the datagram goes there only;
+//   - with a confirmed direct address, the datagram goes to the one of
+//     lowest RTT only;
 //   - otherwise, with the relay up, it goes through the relay, and a copy
 //     goes to every direct candidate if it is a handshake message, or a
 //     transport message ProbeInterval after the last copy;
-//   - with neither, it goes to the last address the peer was heard from,
+//   - with neither, it goes to the address last confirmed,
 //     or else to its first candidate, and handshake messages also to the
 //     other candidates.
 func (b *Bind) Route(now int64, dst netip.AddrPort, data []byte) []Transmit {
@@ -396,8 +415,10 @@ func (b *Bind) Route(now int64, dst netip.AddrPort, data []byte) []Transmit {
 		}
 		return []Transmit{{Dst: dst, Data: data}}
 	}
-	if p.confirmed(now) {
-		return []Transmit{{Dst: p.direct, Data: data}}
+	// Migration is only this choice: the device's session, and what
+	// FromUDP and FromRelay accept, do not depend on it.
+	if a, ok := p.best(now); ok {
+		return []Transmit{{Dst: a, Data: data}}
 	}
 	t := noise.MessageType(data)
 	handshake := t == noise.TypeInitiation || t == noise.TypeResponse || t == noise.TypeCookieReply
@@ -423,8 +444,8 @@ func (b *Bind) Route(now int64, dst netip.AddrPort, data []byte) []Transmit {
 	return out
 }
 
-// targets returns the direct addresses to try: the one the peer was last
-// heard from first, then the candidates, then the learned addresses.
+// targets returns the direct addresses to try: the one last confirmed
+// first, then the candidates, then the learned addresses.
 func (p *peerState) targets() []netip.AddrPort {
 	var t []netip.AddrPort
 	if p.direct.IsValid() {

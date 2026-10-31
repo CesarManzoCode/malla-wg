@@ -366,7 +366,9 @@ func punch(t *testing.T, relay, aKnows, bKnows bool) (a, b *discoNode, extA, ext
 			confB = now
 		}
 	}
-	if a.b.NextDeadline() != Never || b.b.NextDeadline() != Never {
+	// The heartbeat and the retry keep NextDeadline armed after the
+	// window (path.go); the window itself must be closed.
+	if a.b.byKey[b.key].punching(12e9) || b.b.byKey[a.key].punching(12e9) {
 		t.Fatal("a punching window outlived PunchWindow")
 	}
 	t.Logf("relay=%v aKnows=%v bKnows=%v: pings a=%d b=%d, dropped by NAT a=%d b=%d, confirmed a=%d b=%d",

@@ -8,7 +8,9 @@
 //
 // Between the device and the network sits the bind of internal/magic:
 // each peer has a direct path or goes through the relay that the map
-// announces, and the device's sessions do not depend on which.
+// announces, and the device's sessions do not depend on which. The
+// control socket, state_dir/control.sock (control.go), reports the path
+// of each peer to `malla status` and `malla wait-direct`.
 package mesh
 
 import (
@@ -95,10 +97,15 @@ type Node struct {
 	relayRun chan *relay.Client
 	relayURL string
 
+	// ctl is the control socket, open from New; Run serves it.
+	ctl net.Listener
+
 	mu         sync.Mutex
 	addr       netip.Addr
 	id         uint64
 	registered bool
+	// info names the map's peers for the status.
+	info map[[32]byte]peerInfo
 }
 
 type reflexiveReply struct {
@@ -169,6 +176,7 @@ func New(cfg Config) (*Node, error) {
 			n.bind.SetDiscoKey(pc.PublicKey, p.DiscoKey)
 			dc.Peers = append(dc.Peers, pc)
 		}
+		n.setPeerInfo(cache.Peers)
 	}
 	n.rt, err = runtime.New(runtime.Config{
 		Device: dc, Conn: cfg.Conn, TUN: cfg.TUN, OnEvent: cfg.OnEvent, Intercept: n.intercept,
@@ -182,6 +190,11 @@ func New(cfg Config) (*Node, error) {
 		relayURL = cache.Relay
 	}
 	n.useRelay(relayURL)
+	// Open the control socket last, so that it exists once New returns
+	// and malla prints its "up" line.
+	if n.ctl, err = listenControl(cfg.StateDir); err != nil {
+		return nil, fmt.Errorf("mesh: control socket: %w", err)
+	}
 	return n, nil
 }
 
@@ -303,9 +316,10 @@ func (n *Node) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() { defer wg.Done(); n.coordinate(ctx) }()
 	go func() { defer wg.Done(); n.runRelay(ctx) }()
+	go func() { defer wg.Done(); n.serveControl(ctx) }()
 	err := n.rt.Run(ctx)
 	cancel()
 	wg.Wait()
@@ -451,6 +465,7 @@ func (n *Node) apply(ctx context.Context, nm coord.Netmap, raw []byte) {
 	if err != nil {
 		return
 	}
+	n.setPeerInfo(nm.Peers)
 	relayURL := nm.Relay
 	if relayURL == "" {
 		relayURL = n.cfg.RelayURL

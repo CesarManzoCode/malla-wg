@@ -1,6 +1,8 @@
-// Command malla is the node of the mesh. In this version it only has
-// `malla up`: in static mode the peers come from the configuration file,
-// and with coord_url they come from the coordination's map.
+// Command malla is the node of the mesh (contract §3.4). `malla up` runs
+// it: in static mode the peers come from the configuration file, and with
+// coord_url they come from the coordination's map. `malla status` and
+// `malla wait-direct` ask a running mesh node, through its control
+// socket, how each peer is reached.
 package main
 
 import (
@@ -28,7 +30,10 @@ import (
 const mtu = 1420
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: malla up -config node.json")
+	fmt.Fprintln(os.Stderr, `usage:
+  malla up -config node.json
+  malla status [-json] [-config node.json | -socket path]
+  malla wait-direct -peer <name> -timeout <dur> [-config node.json | -socket path]`)
 	os.Exit(2)
 }
 
@@ -48,6 +53,10 @@ func main() {
 			fmt.Fprintln(os.Stderr, "malla:", err)
 			os.Exit(1)
 		}
+	case "status":
+		os.Exit(status(os.Args[2:]))
+	case "wait-direct":
+		os.Exit(waitDirect(os.Args[2:]))
 	default:
 		usage()
 	}

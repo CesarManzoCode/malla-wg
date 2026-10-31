@@ -23,23 +23,31 @@ const maxLearned = 16
 // punching reports whether p's punching window is open at now.
 func (p *peerState) punching(now int64) bool { return now < p.punchUntil }
 
-// NextDeadline returns when Tick must run next, or Never.
+// NextDeadline returns when Tick must run next, or Never. It mirrors the
+// cases of Tick: a pending window or probe, the next round of a window,
+// the heartbeat or the expiry of the confirmed paths, the retry.
 func (b *Bind) NextDeadline() int64 {
 	at := Never
 	for _, p := range b.peers {
 		switch {
 		case !b.discoReady(p):
-		case p.punchPending:
+		case p.punchPending || p.probe.IsValid():
 			return 0
 		case p.nextPing < p.punchUntil:
 			at = min(at, p.nextPing)
+		case len(p.paths) > 0:
+			at = min(at, p.nextBeat, p.expiry())
+		case p.punched:
+			at = min(at, p.lastPunch+PunchRetry)
 		}
 	}
 	return at
 }
 
-// Tick starts the punching windows that new candidates asked for and
-// sends the pings that are due, peer by peer in the order of AddPeer.
+// Tick starts the punching windows that new candidates or the retry ask
+// for, sends the pings that are due (punching rounds, heartbeats and
+// probes) and forgets expired paths, peer by peer in the order of
+// AddPeer.
 func (b *Bind) Tick(now int64) []Transmit {
 	var out []Transmit
 	for _, p := range b.peers {
@@ -51,11 +59,27 @@ func (b *Bind) Tick(now int64) []Transmit {
 				delete(p.pings, id)
 			}
 		}
+		p.prunePaths(now)
 		switch {
 		case p.punchPending:
 			out = append(out, b.startPunch(now, p)...)
-		case p.punching(now) && now >= p.nextPing:
-			out = append(out, b.punchPings(now, p)...)
+		case p.nextPing < p.punchUntil:
+			if now >= p.nextPing {
+				out = append(out, b.punchPings(now, p)...)
+			}
+		case len(p.paths) > 0:
+			if now >= p.nextBeat {
+				out = append(out, b.heartbeat(now, p)...)
+			}
+		case p.punched && now >= p.lastPunch+PunchRetry:
+			out = append(out, b.startPunch(now, p)...)
+		}
+		if p.probe.IsValid() {
+			if !p.punching(now) && !p.confirmed(now) {
+				out = append(out, b.ping(now, p, p.probe)...)
+				p.nextProbe = now + PunchInterval
+			}
+			p.probe = netip.AddrPort{}
 		}
 	}
 	return out
@@ -66,6 +90,7 @@ func (b *Bind) Tick(now int64) []Transmit {
 func (b *Bind) startPunch(now int64, p *peerState) []Transmit {
 	p.punchPending = false
 	p.punchUntil = now + PunchWindow
+	p.punched, p.lastPunch = true, now
 	var out []Transmit
 	if b.relayUp {
 		cmm := Message{Type: DiscoCallMeMaybe, Addrs: b.endpoints}
@@ -83,23 +108,29 @@ func (b *Bind) startPunch(now int64, p *peerState) []Transmit {
 // send here, which an EIM-APDF NAT on each side cannot survive.
 func (b *Bind) punchPings(now int64, p *peerState) []Transmit {
 	p.nextPing = now + PunchInterval
+	var out []Transmit
+	for _, dst := range p.targets() {
+		out = append(out, b.ping(now, p, dst)...)
+	}
+	return out
+}
+
+// ping sends p one ping to dst and remembers it for the pong; it sends
+// nothing if the randomness fails.
+func (b *Bind) ping(now int64, p *peerState, dst netip.AddrPort) []Transmit {
 	if p.pings == nil {
 		p.pings = make(map[[12]byte]pingSent)
 	}
-	var out []Transmit
-	for _, dst := range p.targets() {
-		var txid [12]byte
-		if _, err := io.ReadFull(b.rand, txid[:]); err != nil {
-			return out
-		}
-		frame, ok := b.seal(p, Message{Type: DiscoPing, TxID: txid, NodeKey: b.nodeKey})
-		if !ok {
-			return out
-		}
-		p.pings[txid] = pingSent{dst: dst, at: now}
-		out = append(out, Transmit{Dst: dst, Data: frame})
+	var txid [12]byte
+	if _, err := io.ReadFull(b.rand, txid[:]); err != nil {
+		return nil
 	}
-	return out
+	frame, ok := b.seal(p, Message{Type: DiscoPing, TxID: txid, NodeKey: b.nodeKey})
+	if !ok {
+		return nil
+	}
+	p.pings[txid] = pingSent{dst: dst, at: now}
+	return []Transmit{{Dst: dst, Data: frame}}
 }
 
 // seal frames m for p with a fresh nonce.
@@ -182,15 +213,17 @@ func (b *Bind) callMeMaybe(now int64, p *peerState, addrs []netip.AddrPort) []Tr
 	return b.startPunch(now, p)
 }
 
-// confirm makes dst p's confirmed direct address if txid is a ping the
-// node sent to dst and the pong came from there.
+// confirm makes src a confirmed direct address of p, with the measured
+// RTT, if txid is a ping the node sent to src and the pong came from
+// there.
 func (b *Bind) confirm(now int64, p *peerState, src netip.AddrPort, txid [12]byte) {
 	s, ok := p.pings[txid]
 	if !ok || s.dst != src {
 		return
 	}
 	delete(p.pings, txid)
-	p.direct, p.heard, p.rtt = src, now, now-s.at
+	p.rtt = now - s.at
+	p.confirmAddr(now, src, p.rtt)
 	b.reindex(p)
 }
 

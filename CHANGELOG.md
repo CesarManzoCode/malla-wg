@@ -2,6 +2,18 @@
 
 ## Sin publicar
 
+### Malla: coordinación, relay, traversal y CLI (K2)
+
+Implementada, pendiente de cierre: las pruebas de los criterios 19 a 24 están escritas y no se han corrido todavía.
+
+- Servidor de coordinación HTTPS con registro, mapa de pares por long-poll, políticas con grupos y tags, revocación y servicio de endpoint reflexivo; el nodo sigue con el mapa en caché si la coordinación cae.
+- Relay HTTPS con tramas propias que solo reenvía datagramas WireGuard o disco ya cifrados.
+- Bind por par con endpoint ficticio: el dispositivo nunca ve la dirección real de un par, así que su sesión no depende del camino.
+- Disco (ping, pong y CallMeMaybe cifrados con una clave propia por nodo), descubrimiento de endpoints y hole punching simultáneo.
+- Elección de camino: el directo confirmado por un pong de hace menos de 5 s con menor RTT, si no el relay; latido cada 2 s, vuelta al relay sin pong en 5 s y reintento de punching cada 30 s. Un datagrama WireGuard que llega por UDP mientras el par va por el relay dispara un ping a esa dirección, para pasar a directo sin esperar el reintento.
+- Migración sin corte: al cambiar de camino solo cambia el destino de salida; la entrada se acepta por los dos caminos y el handshake no se reinicia.
+- Socket de control en `state_dir/control.sock` y CLI: `malla status [-json]` informa `direct` o `relay` por par, y `malla wait-direct -peer <nombre> -timeout <dur>` sale con 0 al lograr camino directo y con 1 al vencer el plazo.
+
 ### Protocolo WireGuard e interoperabilidad (K1)
 
 Cerrado el 2026-10-31 sobre el commit `a9e1610`: los 16 criterios de salida pasan, incluida la interoperabilidad contra el WireGuard del kernel y contra wireguard-go.
