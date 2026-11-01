@@ -1,7 +1,9 @@
+//go:build !mutant_norekey
+
 package device
 
 // Rekey and rejection decisions. They live in this file on their own so
-// the mutant_norekey build of K3 can replace them.
+// the mutant_norekey build of K3 can replace them (rekey_norekey.go).
 
 // keypairExpired reports whether k is too old to send or receive with:
 // REJECT_AFTER_TIME has passed since it was derived.

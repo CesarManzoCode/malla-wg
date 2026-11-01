@@ -2,6 +2,19 @@
 
 ## Sin publicar
 
+### Matriz de NAT, mutantes y criterios globales (K3)
+
+Implementado, pendiente de cierre: las pruebas de K3 están escritas y kiln las corre al cerrar el K.
+
+- Tabla teórica de NAT de 185 celdas (`matrix/theory.json`), generada desde las reglas de RFC 4787 del contrato y recalculada por separado en su prueba; archivo de hallazgos `matrix/findings.json`, vacío al empezar.
+- NATs en el simulador: mapeo EIM, ADM y APDM, filtrado EIF, ADF y APDF por mapeo, hairpin, CGNAT anidado y timeout de mapeo por inactividad.
+- La malla corre dentro del simulador con el mismo código del producto (`mesh.Core`), con la coordinación, el servicio reflexivo y el relay simulados; matriz simulada con las semillas 1 a 8 por celda.
+- NATs reales con nftables en espacios de red para `none`, EIM-* y APDM-*, con sondeo de su mapeo, filtrado y hairpin, y matriz real con `malla wait-direct`.
+- Mutantes `mutant_noreplay`, `mutant_norekey` y `mutant_nopunch` por etiquetas de compilación, sin cambio del producto sin ellas, y pruebas que exigen que el verificador de cada propiedad los detecte.
+- `verify/cmd/loc` cuenta las líneas de producto, apoyo y pruebas del producto y falla si el apoyo no es menor que el producto.
+- `verify/cmd/deps` lista los módulos de la compilación y las pruebas, clasifica su licencia y falla con una licencia no reconocida o un SDK de una API de pago.
+- `make test-unpriv` corre la suite completa sin espacios de red ni capacidades y sin acceso a la red para los módulos.
+
 ### Malla: coordinación, relay, traversal y CLI (K2)
 
 Cerrado el 2026-11-01 UTC sobre el commit `5d64153`: los 6 criterios de salida pasan, entre ellos la transferencia por el relay HTTPS con todo el UDP bloqueado y la migración de relay a directo en plena transferencia sin pérdida, duplicación ni nuevo handshake.

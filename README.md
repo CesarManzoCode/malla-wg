@@ -16,9 +16,27 @@ El diseño y las decisiones están en [`vault/CONTRACT.md`](vault/CONTRACT.md), 
 | K0 | Fundación: contrato, investigación, plan | Hecha |
 | K1 | Criptografía, protocolo WireGuard, simulador base, interoperabilidad con el kernel y wireguard-go, plano de datos | Cerrada |
 | K2 | Coordinación y políticas, relay HTTPS, descubrimiento y hole punching, elección de camino, migración, CLI | Cerrada |
-| K3 | Matriz de NAT (teoría, simulador, NATs reales), mutantes, conteo de líneas, dependencias, suite sin permisos | Pendiente |
+| K3 | Matriz de NAT (teoría, simulador, NATs reales), mutantes, conteo de líneas, dependencias, suite sin permisos | Implementada, pendiente de cierre |
 
 ## Resultados
+
+### K3 (implementado, pendiente de cierre)
+
+Las pruebas de K3 están escritas y todavía no se corrieron: esta sección dice qué mide cada criterio y dónde se ve su resultado, no el resultado. Las cifras llegarán con el cierre.
+
+| # | Qué mide | Dónde se ve |
+| --- | --- | --- |
+| 14 | Que `matrix/theory.json` tenga las 185 celdas de §4.3 del contrato y coincida con las reglas de §4.2 recalculadas por separado | `verify/matrix` `TestCritTheoryCoverage` |
+| 15 | Que cada celda, con las semillas 1 a 8 en el simulador, dé lo que dice la teoría o esté registrada como hallazgo en `matrix/findings.json` | `verify/matrix` `TestCritSimMatrix`: una línea por grupo con corridas directas y por relay, y por cada celda que difiere, `seed=` y `repro:` |
+| 16 | Lo mismo con NATs reales de nftables en espacios de red, en las celdas sin ADM | `verify/matrix` `TestCritLinuxMatrix`, que además enumera las celdas sin oráculo real |
+| 17 | Que el mapeo, el filtrado y el hairpin que miden los sondeos en los NATs reales sean los del tipo pedido | `verify/matrix` `TestCritNATFidelity` |
+| 18 | Que con NAT simétrico en los dos lados la malla quede en relay y el tráfico pase completo | `verify/matrix` `TestCritSymmetricRelaySim` y `TestCritSymmetricRelayLinux` |
+| 27 | Que el verificador de anti-replay detecte un filtro que acepta todo (`-tags mutant_noreplay`) | `verify/mutants` `TestCritMutantAntiReplay`: la salida de `TestCritAntiReplayProperty` con `property anti-replay violated` |
+| 28 | Que el verificador de rekey detecte un dispositivo sin rekey ni rechazo de sesiones viejas (`-tags mutant_norekey`) | `verify/mutants` `TestCritMutantRekey`: la salida de `TestCritRekeyTimers` con `property rekey violated` |
+| 29 | Que la matriz simulada detecte un nodo que no manda pings (`-tags mutant_nopunch`) | `verify/mutants` `TestCritMutantHolePunch`: la salida de `TestCritSimMatrix` con `property nat-matrix violated` y las celdas directas según la teoría que quedaron en relay |
+| 30 | Que el apoyo (`sim/`, `verify/`) tenga menos líneas de código que el producto (`internal/`, `cmd/`) | `go run ./verify/cmd/loc`: los tres totales y el porcentaje de apoyo sobre producto |
+| 31 | Que toda dependencia de la compilación y de las pruebas tenga una licencia libre reconocida y ninguna sea el SDK de una API de pago, y que todo compile sin red | `go run ./verify/cmd/deps`: una línea por módulo con su licencia; compilación con `GOPROXY=off` |
+| 32 | Que la suite completa corra sin espacios de red ni de usuario y que lo único no aprobado sean saltos `needs-privilege:` | `make test-unpriv`: una línea `<Prueba> pass\|skip\|fail` por prueba, de `verify/critrun` |
 
 ### K2 (verificado el 2026-11-01 UTC sobre el commit `5d64153`)
 
@@ -71,6 +89,16 @@ make check
 ```
 
 Corre formato, `go vet` y las pruebas en modo corto. Las pruebas que necesitan espacios de red no usan sudo: entran en un espacio de usuario sin privilegios y se saltan si el sistema no lo permite.
+
+Otros comandos:
+
+```
+make vectors                  # vectores RFC y Wycheproof de las primitivas
+make test-unpriv              # la suite completa sin espacios de red ni capacidades (§8 del contrato)
+go run ./verify/cmd/loc       # líneas de producto, apoyo y pruebas del producto
+go run ./verify/cmd/deps      # módulos de la compilación y las pruebas, con su licencia
+go test -tags mutant_noreplay -run '^TestCritAntiReplayProperty$' ./internal/noise   # un mutante a mano: debe fallar
+```
 
 Un nodo de la malla se levanta con `malla up -config node.json` y abre un socket de control en `state_dir/control.sock`. Con el nodo corriendo:
 

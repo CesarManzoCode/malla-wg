@@ -105,7 +105,8 @@ func (b *Bind) startPunch(now int64, p *peerState) []Transmit {
 // target of p, and the next round PunchInterval later. Both sides run it
 // on their own, one because its candidates changed and the other because
 // of the CallMeMaybe; the K3 mutant mutant_nopunch makes only one side
-// send here, which an EIM-APDF NAT on each side cannot survive.
+// send pings (sendsPings), which an EIM-APDF NAT on each side cannot
+// survive.
 func (b *Bind) punchPings(now int64, p *peerState) []Transmit {
 	p.nextPing = now + PunchInterval
 	var out []Transmit
@@ -116,8 +117,12 @@ func (b *Bind) punchPings(now int64, p *peerState) []Transmit {
 }
 
 // ping sends p one ping to dst and remembers it for the pong; it sends
-// nothing if the randomness fails.
+// nothing if the randomness fails, or if sendsPings says this node does
+// not ping p.
 func (b *Bind) ping(now int64, p *peerState, dst netip.AddrPort) []Transmit {
+	if !b.sendsPings(p) {
+		return nil
+	}
 	if p.pings == nil {
 		p.pings = make(map[[12]byte]pingSent)
 	}
