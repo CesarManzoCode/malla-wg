@@ -412,15 +412,10 @@ func (m measurement) String() string {
 		m.obs[2], netip.AddrPortFrom(probeIP1, 3480), m.obs[0], m.other, m.port, m.exact)
 }
 
-// probe measures the mapping and the filtering in front of h from its
-// probe port.
-func (s *probeServers) probe(h lhost) (measurement, error) {
+// probe measures the mapping and the filtering in front of h from c, the
+// socket on its probe port.
+func (s *probeServers) probe(h lhost, c *net.UDPConn) (measurement, error) {
 	m := measurement{local: h.probeLocal()}
-	c, err := listenIn(h.ns, m.local)
-	if err != nil {
-		return m, err
-	}
-	defer c.Close()
 	for i, srv := range []*net.UDPConn{s.s1, s.s2, s.s3} {
 		msg := fmt.Sprintf("map%d", i)
 		if _, err := c.WriteToUDPAddrPort([]byte(msg), addrOf(srv)); err != nil {
@@ -461,18 +456,10 @@ func (h hairpinMeasurement) String() string {
 		h.obsA, h.obsB, h.got1, h.src1, h.got2, h.src2)
 }
 
-func (s *probeServers) hairpin(a, b lhost) (hairpinMeasurement, error) {
+// hairpin runs the hairpin probe from ca and cb, the probe sockets of a
+// and b.
+func (s *probeServers) hairpin(ca, cb *net.UDPConn) (hairpinMeasurement, error) {
 	var h hairpinMeasurement
-	ca, err := listenIn(a.ns, a.probeLocal())
-	if err != nil {
-		return h, err
-	}
-	defer ca.Close()
-	cb, err := listenIn(b.ns, b.probeLocal())
-	if err != nil {
-		return h, err
-	}
-	defer cb.Close()
 	for _, p := range []struct {
 		c   *net.UDPConn
 		obs *netip.AddrPort
@@ -504,15 +491,29 @@ func (s *probeServers) hairpin(a, b lhost) (hairpinMeasurement, error) {
 // hairpin and EIF or EIM (b's mapping already sent to a's endpoint, which
 // a's EIM mapping keeps); arrivals from the external address (REQ-9a),
 // and with EIM from a's own endpoint.
+//
+// Each host's probe socket is bound once for both probes: a socket closed
+// here stays bound while a process another cell forks still holds a copy
+// of the descriptor table before its exec, so binding the port again
+// could fail with EADDRINUSE.
 func (tp *topo) fidelity() error {
 	srv, err := tp.servers()
 	if err != nil {
 		return err
 	}
 	defer srv.close()
-	var problems []string
+	var conns []*net.UDPConn
 	for _, h := range []lhost{tp.a, tp.b} {
-		m, err := srv.probe(h)
+		c, err := listenIn(h.ns, h.probeLocal())
+		if err != nil {
+			return fmt.Errorf("%s: %v", h.ns, err)
+		}
+		defer c.Close()
+		conns = append(conns, c)
+	}
+	var problems []string
+	for i, h := range []lhost{tp.a, tp.b} {
+		m, err := srv.probe(h, conns[i])
 		if err != nil {
 			return fmt.Errorf("%s: %v", h.ns, err)
 		}
@@ -521,7 +522,7 @@ func (tp *topo) fidelity() error {
 		}
 	}
 	if tp.shared {
-		hm, err := srv.hairpin(tp.a, tp.b)
+		hm, err := srv.hairpin(conns[0], conns[1])
 		if err != nil {
 			return fmt.Errorf("hairpin: %v", err)
 		}
