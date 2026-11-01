@@ -14,12 +14,13 @@ import (
 // in under 1 s (it is under load from 128 queued handshakes) while the
 // own node starts a real handshake; the own node accepts a cookie reply,
 // retries with mac2 and its ping is answered. A flood that leaves
-// wireguard-go out of load is repeated (UnderLoadAttempts). (b) The own node as
+// wireguard-go out of load or misses the deadline is repeated
+// (UnderLoadAttempts, FloodInvalid). (b) The own node as
 // responder with ForceUnderLoad: wireguard-go gets the cookie, retries
 // with mac2 and its ping is answered.
 func TestCritCookieWireGuardGo(t *testing.T) {
 	t.Run("wireguard-go-under-load", func(t *testing.T) {
-		UnderLoadAttempts(t, func(t *testing.T, _ int) bool {
+		UnderLoadAttempts(t, func(t *testing.T, _ int) string {
 			w, o := wggoSetup(t, true, [32]byte{}, [32]byte{})
 			msg := FloodInitiation(t, w.Public)
 			conns := make([]*net.UDPConn, 4)
@@ -39,12 +40,9 @@ func TestCritCookieWireGuardGo(t *testing.T) {
 					t.Errorf("the own node sent no initiation: %s", Failure("own", o, w.State()))
 				}
 			})
-			if took >= time.Second {
-				t.Errorf("the flood of %d initiations took %v, want under 1 s", FloodSize, took)
-			}
-			if !loaded {
-				t.Logf("wireguard-go answered none of the first %d initiations with a cookie: not under load", FloodSize/2)
-				return false
+			if why := FloodInvalid(t, o, took, loaded); why != "" {
+				t.Logf("invalid attempt: %s", why)
+				return why
 			}
 			if !o.Events.Wait(device.EventCookie, "", 3*time.Second) {
 				t.Fatalf("the own node accepted no cookie reply: %s", Failure("own", o, w.State()))
@@ -58,7 +56,7 @@ func TestCritCookieWireGuardGo(t *testing.T) {
 			if !w.Handshaked() {
 				t.Errorf("wireguard-go shows no handshake: %s", Failure("own", o, w.State()))
 			}
-			return true
+			return ""
 		})
 	})
 	t.Run("own-under-load", func(t *testing.T) {

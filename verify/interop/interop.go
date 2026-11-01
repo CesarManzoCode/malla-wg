@@ -305,9 +305,14 @@ const floodPause = 50 * time.Millisecond
 // queue to reach the 512 entries that put it under load.
 const floodBatch = 64
 
-// floodAttempts is how many floods UnderLoadAttempts tries, floodGap
-// apart, before failing because none put the oracle under load.
+// A flood counts as an attempt only if it took under floodDeadline
+// (contract §6: FloodSize initiations in under 1 s) and put the oracle
+// under load; otherwise it says nothing about the own node, since a busy
+// machine stretches the flood and an oracle out of load sends no cookie.
+// UnderLoadAttempts repeats such a flood, floodGap after the previous
+// one, at most floodAttempts times, and fails if none counted.
 const (
+	floodDeadline = time.Second
 	floodAttempts = 10
 	floodGap      = time.Second
 )
@@ -396,23 +401,47 @@ func countCookies(c *net.UDPConn, deadline time.Time) int {
 	}
 }
 
-// UnderLoadAttempts runs attempt, each time in a subtest of its own and
-// floodGap after the previous one, until it reports that its flood put
-// the oracle under load, at most floodAttempts times. An attempt whose
-// flood did not says nothing about the own node, since a receiver that is
-// not under load sends no cookie; an attempt that fails ends the loop.
-func UnderLoadAttempts(t *testing.T, attempt func(t *testing.T, n int) (loaded bool)) {
+// FloodInvalid returns why a flood that took took, and found the oracle
+// under load or not, does not count as an attempt, or "" if it does. A
+// flood over floodDeadline that found the oracle under load did trigger
+// the own node o, so FloodInvalid first waits up to 3 s for o to accept
+// the oracle's cookie reply, and fails t if o rejected one instead: that
+// is the own node's fault, not the machine's.
+func FloodInvalid(t testing.TB, o *Own, took time.Duration, loaded bool) string {
 	t.Helper()
+	var why []string
+	if !loaded {
+		why = append(why, fmt.Sprintf("no cookie reply to the first %d initiations: not under load", FloodSize/2))
+	}
+	if took >= floodDeadline {
+		why = append(why, fmt.Sprintf("the flood of %d initiations took %v, want under %v", FloodSize, took, floodDeadline))
+		if loaded && !o.Events.Wait(device.EventCookie, "", 3*time.Second) && o.Events.Count(device.EventDrop, device.ReasonCookieReply) > 0 {
+			t.Fatalf("the own node rejected a cookie reply")
+		}
+	}
+	return strings.Join(why, "; ")
+}
+
+// UnderLoadAttempts runs attempt, each time in a subtest of its own and
+// floodGap after the previous one, until one counts, at most
+// floodAttempts times. attempt returns FloodInvalid's reason when its
+// flood does not count, and "" when it does; an attempt that fails ends
+// the loop.
+func UnderLoadAttempts(t *testing.T, attempt func(t *testing.T, n int) (invalid string)) {
+	t.Helper()
+	var why []string
 	for n := 1; n <= floodAttempts; n++ {
 		if n > 1 {
 			time.Sleep(floodGap)
 		}
-		loaded := false
-		if ok := t.Run(fmt.Sprintf("attempt-%d", n), func(t *testing.T) { loaded = attempt(t, n) }); !ok || loaded {
+		invalid := ""
+		if ok := t.Run(fmt.Sprintf("attempt-%d", n), func(t *testing.T) { invalid = attempt(t, n) }); !ok || invalid == "" {
 			return
 		}
+		why = append(why, fmt.Sprintf("attempt %d: %s", n, invalid))
 	}
-	t.Fatalf("none of %d floods of %d initiations put the oracle under load", floodAttempts, FloodSize)
+	t.Fatalf("none of %d floods of %d initiations put the oracle under load within %v, so no cookie reply was tested:\n%s",
+		floodAttempts, FloodSize, floodDeadline, strings.Join(why, "\n"))
 }
 
 // Failure formats what a failed run reports (contract §7, k1-07): who

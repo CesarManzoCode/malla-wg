@@ -17,14 +17,15 @@ import (
 // a valid mac1 for the kernel's key reach A in under 1 s while the own
 // node starts a real handshake; the own node accepts a cookie reply,
 // retries with mac2 and its ping is answered. A flood that leaves the
-// kernel out of load is repeated (UnderLoadAttempts). (b) The own node as
+// kernel out of load or misses the deadline is repeated (UnderLoadAttempts,
+// FloodInvalid). (b) The own node as
 // responder with ForceUnderLoad and the kernel as initiator: the kernel
 // gets the cookie, retries with mac2 and its ping is answered.
 func TestCritCookieKernel(t *testing.T) {
 	netns.Require(t)
 	netns.Run(t, func(t *testing.T) {
 		t.Run("kernel-under-load", func(t *testing.T) {
-			UnderLoadAttempts(t, func(t *testing.T, n int) bool {
+			UnderLoadAttempts(t, func(t *testing.T, n int) string {
 				id := fmt.Sprintf("1%c", 'a'+n-1)
 				k, o := kernelSetup(t, id, true, [32]byte{}, [32]byte{})
 				// The flood leaves from a second address of B: past 2048
@@ -64,12 +65,9 @@ func TestCritCookieKernel(t *testing.T) {
 						t.Errorf("the own node sent no initiation: %s", Failure("own", o, k.State()))
 					}
 				})
-				if took >= time.Second {
-					t.Errorf("the flood of %d initiations took %v, want under 1 s", FloodSize, took)
-				}
-				if !loaded {
-					t.Logf("the kernel answered none of the first %d initiations with a cookie: not under load", FloodSize/2)
-					return false
+				if why := FloodInvalid(t, o, took, loaded); why != "" {
+					t.Logf("invalid attempt: %s", why)
+					return why
 				}
 				if !o.Events.Wait(device.EventCookie, "", 3*time.Second) {
 					t.Fatalf("the own node accepted no cookie reply: %s", Failure("own", o, k.State()))
@@ -85,7 +83,7 @@ func TestCritCookieKernel(t *testing.T) {
 				if p, err := k.Peer(); err != nil || p.LastHandshakeTime.IsZero() {
 					t.Errorf("kernel shows no handshake (%v): %s", err, Failure("own", o, k.State()))
 				}
-				return true
+				return ""
 			})
 		})
 		t.Run("own-under-load", func(t *testing.T) {

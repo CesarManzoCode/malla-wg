@@ -2,6 +2,7 @@
 
 ## Sin publicar
 
+- Las pruebas de cookies bajo carga cuentan una inundación que no cumple el plazo de 1 s como intento no válido y la repiten, en vez de fallar por una máquina ocupada; el plazo, los intentos y el motivo están en un solo lugar (p02).
 - critrun cuenta como aprobado el salto intencional de `TestForcedFailure`, la única excepción declarada, para que `make test-unpriv` no salga con 1 sobre la suite completa por él (p01).
 
 ### Matriz de NAT, mutantes y criterios globales (K3)
