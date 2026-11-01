@@ -174,6 +174,65 @@ func TestDiscoDemux(t *testing.T) {
 	}
 }
 
+func TestPongConfirmsPingDestination(t *testing.T) {
+	// a pings two addresses of b. Behind an APDM NAT b's pong leaves
+	// through a new mapping, so it arrives from z, an address a never
+	// pinged (contract §3.3, p03).
+	a, b := newDiscoBind(1, 1), newDiscoBind(2, 2)
+	link(a, b)
+	pa := a.b.byKey[b.key]
+	x, y := netip.MustParseAddrPort("198.51.100.1:40000"), netip.MustParseAddrPort("198.51.100.1:40001")
+	z := netip.MustParseAddrPort("198.51.100.1:40002")
+	pingX, pingY := a.b.ping(0, pa, x), a.b.ping(0, pa, y)
+	if len(pingX) != 1 || len(pingY) != 1 {
+		t.Fatalf("pings: %+v %+v", pingX, pingY)
+	}
+	seen := netip.MustParseAddrPort("203.0.113.1:41000")
+	out := b.b.DiscoUDP(0, seen, pingX[0].Data)
+	if len(out) != 1 {
+		t.Fatalf("answer to the ping to x: %+v", out)
+	}
+	pong := out[0].Data
+	sent, err := OpenDisco(&b.b.byKey[a.key].shared, pingX[0].Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Nothing that fails authentication or names no pending ping
+	// confirms anything, from z or from x itself.
+	tampered := bytes.Clone(pong)
+	tampered[len(tampered)-1] ^= 1
+	unknown, _ := b.b.seal(b.b.byKey[a.key], Message{Type: DiscoPong, TxID: [12]byte{0xaa}, Addr: seen})
+	stranger := newDiscoBind(3, 3)
+	stranger.b.AddPeer(a.key, nil)
+	stranger.b.SetDiscoKey(a.key, a.b.DiscoPublic())
+	foreign, _ := stranger.b.seal(stranger.b.byKey[a.key], Message{Type: DiscoPong, TxID: sent.TxID, Addr: seen})
+	asPing, _ := b.b.seal(b.b.byKey[a.key], Message{Type: DiscoPing, TxID: sent.TxID, NodeKey: b.key})
+	for name, d := range map[string][]byte{"tampered": tampered, "unknown txid": unknown, "foreign disco key": foreign, "ping with the txid": asPing} {
+		for _, src := range []netip.AddrPort{x, z} {
+			a.b.DiscoUDP(5e6, src, d)
+			if pa.confirmed(5e6) || len(pa.paths) != 0 {
+				t.Fatalf("%s pong from %s confirmed %v", name, src, pa.paths)
+			}
+		}
+	}
+
+	// The authentic pong from z confirms x, the ping's destination, with
+	// its RTT; not z, and not y, whose ping is still pending.
+	a.b.DiscoUDP(10e6, z, pong)
+	if p, ep := a.b.PathOf(10e6, b.key); p != PathDirect || ep != x {
+		t.Fatalf("path after the pong from z = %s %s, want direct %s", p, ep, x)
+	}
+	if len(pa.paths) != 1 || pa.paths[0].addr != x || pa.paths[0].rtt != 10e6 || a.b.RTT(b.key) != 10e6 {
+		t.Fatalf("paths %+v, RTT %d", pa.paths, a.b.RTT(b.key))
+	}
+	// The same pong again confirms nothing more: its txid is spent.
+	a.b.DiscoUDP(20e6, x, pong)
+	if len(pa.paths) != 1 || pa.paths[0].at != 10e6 {
+		t.Fatalf("a replayed pong refreshed the path: %+v", pa.paths)
+	}
+}
+
 func TestEndpoints(t *testing.T) {
 	mesh := netip.MustParsePrefix("10.200.0.0/16")
 	refl := netip.MustParseAddrPort("203.0.113.9:40001")

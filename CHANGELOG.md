@@ -2,6 +2,7 @@
 
 ## Sin publicar
 
+- Un pong autenticado con la clave disco del par confirma como directa la dirección a la que se mandó su ping, aunque llegue desde otro origen, como pasa detrás de un NAT APDM; antes debía llegar desde esa misma dirección. Un pong que no abre con la clave del par, o cuyo txid no es de un ping pendiente, sigue sin confirmar nada. Se quitan de `matrix/findings.json` los 3 hallazgos del simulador que causaba la regla anterior; con la nueva, la matriz simulada debe coincidir con la teoría en las 185 celdas, lo que se midió antes con un cambio equivalente y aún no con este código (p03).
 - Las pruebas de cookies bajo carga cuentan una inundación que no cumple el plazo de 1 s como intento no válido y la repiten, en vez de fallar por una máquina ocupada; el plazo, los intentos y el motivo están en un solo lugar (p02).
 - critrun cuenta como aprobado el salto intencional de `TestForcedFailure`, la única excepción declarada, para que `make test-unpriv` no salga con 1 sobre la suite completa por él (p01).
 

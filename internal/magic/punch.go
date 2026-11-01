@@ -167,8 +167,9 @@ func (b *Bind) open(data []byte) (*peerState, Message, bool) {
 //
 //   - a Ping is answered with a Pong to src, the observed address, which
 //     becomes a candidate of the peer;
-//   - a Pong to a ping the node sent to src confirms src as the peer's
-//     direct address;
+//   - a Pong whose txid is a pending ping confirms the address that ping
+//     went to as the peer's direct address, whatever src is: behind an
+//     APDM NAT the pong leaves through a new mapping;
 //   - a CallMeMaybe is handled as from the relay.
 func (b *Bind) DiscoUDP(now int64, src netip.AddrPort, data []byte) []Transmit {
 	p, m, ok := b.open(data)
@@ -187,7 +188,7 @@ func (b *Bind) DiscoUDP(now int64, src netip.AddrPort, data []byte) []Transmit {
 		}
 		return []Transmit{{Dst: src, Data: pong}}
 	case DiscoPong:
-		b.confirm(now, p, src, m.TxID)
+		b.confirm(now, p, m.TxID)
 	case DiscoCallMeMaybe:
 		return b.callMeMaybe(now, p, m.Addrs)
 	}
@@ -218,17 +219,21 @@ func (b *Bind) callMeMaybe(now int64, p *peerState, addrs []netip.AddrPort) []Tr
 	return b.startPunch(now, p)
 }
 
-// confirm makes src a confirmed direct address of p, with the measured
-// RTT, if txid is a ping the node sent to src and the pong came from
-// there.
-func (b *Bind) confirm(now int64, p *peerState, src netip.AddrPort, txid [12]byte) {
+// confirm makes the destination of the pending ping txid a confirmed
+// direct address of p, with the measured RTT. The pong that carries txid
+// was opened with p's disco key, and only p could read the txid in the
+// ping, so it shows the ping sent there reached p; where
+// the pong came from proves nothing more and is not checked (contract
+// §3.3, p03). A txid answered once, expired or never sent confirms
+// nothing.
+func (b *Bind) confirm(now int64, p *peerState, txid [12]byte) {
 	s, ok := p.pings[txid]
-	if !ok || s.dst != src {
+	if !ok {
 		return
 	}
 	delete(p.pings, txid)
 	p.rtt = now - s.at
-	p.confirmAddr(now, src, p.rtt)
+	p.confirmAddr(now, s.dst, p.rtt)
 	b.reindex(p)
 }
 
