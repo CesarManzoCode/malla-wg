@@ -16,27 +16,31 @@ El diseño y las decisiones están en [`vault/CONTRACT.md`](vault/CONTRACT.md), 
 | K0 | Fundación: contrato, investigación, plan | Hecha |
 | K1 | Criptografía, protocolo WireGuard, simulador base, interoperabilidad con el kernel y wireguard-go, plano de datos | Cerrada |
 | K2 | Coordinación y políticas, relay HTTPS, descubrimiento y hole punching, elección de camino, migración, CLI | Cerrada |
-| K3 | Matriz de NAT (teoría, simulador, NATs reales), mutantes, conteo de líneas, dependencias, suite sin permisos | Implementada, pendiente de cierre |
+| K3 | Matriz de NAT (teoría, simulador, NATs reales), mutantes, conteo de líneas, dependencias, suite sin permisos | Cerrada |
 
 ## Resultados
 
-### K3 (implementado, pendiente de cierre)
+### K3 (verificado el 2026-11-01 UTC sobre el commit `7a83990`)
 
-Las pruebas de K3 están escritas y todavía no se corrieron: esta sección dice qué mide cada criterio y dónde se ve su resultado, no el resultado. Las cifras llegarán con el cierre.
+Los 11 criterios de salida de K3 pasaron en una corrida sin `-short` que cuenta como fallo cualquier prueba saltada, y en la misma corrida volvieron a pasar los 16 de K1 y los 6 de K2.
 
-| # | Qué mide | Dónde se ve |
+| # | Qué se midió | Resultado |
 | --- | --- | --- |
-| 14 | Que `matrix/theory.json` tenga las 185 celdas de §4.3 del contrato y coincida con las reglas de §4.2 recalculadas por separado | `verify/matrix` `TestCritTheoryCoverage` |
-| 15 | Que cada celda, con las semillas 1 a 8 en el simulador, dé lo que dice la teoría o esté registrada como hallazgo en `matrix/findings.json` | `verify/matrix` `TestCritSimMatrix`: una línea por grupo con corridas directas y por relay, y por cada celda que difiere, `seed=` y `repro:` |
-| 16 | Lo mismo con NATs reales de nftables en espacios de red, en las celdas sin ADM | `verify/matrix` `TestCritLinuxMatrix`, que además enumera las celdas sin oráculo real |
-| 17 | Que el mapeo, el filtrado y el hairpin que miden los sondeos en los NATs reales sean los del tipo pedido | `verify/matrix` `TestCritNATFidelity` |
-| 18 | Que con NAT simétrico en los dos lados la malla quede en relay y el tráfico pase completo | `verify/matrix` `TestCritSymmetricRelaySim` y `TestCritSymmetricRelayLinux` |
-| 27 | Que el verificador de anti-replay detecte un filtro que acepta todo (`-tags mutant_noreplay`) | `verify/mutants` `TestCritMutantAntiReplay`: la salida de `TestCritAntiReplayProperty` con `property anti-replay violated` |
-| 28 | Que el verificador de rekey detecte un dispositivo sin rekey ni rechazo de sesiones viejas (`-tags mutant_norekey`) | `verify/mutants` `TestCritMutantRekey`: la salida de `TestCritRekeyTimers` con `property rekey violated` |
-| 29 | Que la matriz simulada detecte un nodo que no manda pings (`-tags mutant_nopunch`) | `verify/mutants` `TestCritMutantHolePunch`: la salida de `TestCritSimMatrix` con `property nat-matrix violated` y las celdas directas según la teoría que quedaron en relay |
-| 30 | Que el apoyo (`sim/`, `verify/`) tenga menos líneas de código que el producto (`internal/`, `cmd/`) | `go run ./verify/cmd/loc`: los tres totales y el porcentaje de apoyo sobre producto |
-| 31 | Que toda dependencia de la compilación y de las pruebas tenga una licencia libre reconocida y ninguna sea el SDK de una API de pago, y que todo compile sin red | `go run ./verify/cmd/deps`: una línea por módulo con su licencia; compilación con `GOPROXY=off` |
-| 32 | Que la suite completa corra sin espacios de red ni de usuario y que lo único no aprobado sean saltos `needs-privilege:` | `make test-unpriv`: una línea `<Prueba> pass\|skip\|fail` por prueba, de `verify/critrun` |
+| 14 | `matrix/theory.json` contra las reglas de §4.2 del contrato, recalculadas por separado por la prueba y por el checker | las 185 celdas coinciden: pair 55 (35 directas), hairpin 18 (5), cgnat 80 (61), cgnat_same 32 (9) |
+| 15 | Las 185 celdas en el simulador, con las semillas 1 a 8 | coinciden con la teoría salvo 3 celdas registradas como hallazgo: `pair APDM-EIF\|APDM-EIF`, `pair APDM-EIF\|APDM-ADF` y `hairpin APDM-EIF\|hairpin=True` quedan en relay con las 8 semillas donde la teoría dice directo |
+| 16 | Las celdas sin ADM con NATs reales de nftables en espacios de red, `malla wait-direct -timeout 30s` en los dos nodos | coinciden con la teoría salvo 2 celdas registradas como hallazgo: `pair EIM-APDF\|APDM-EIF` y `pair APDM-EIF\|APDM-APDF` dan directo donde la teoría dice relay; la prueba enumera las celdas ADM-* sin oráculo real |
+| 17 | Mapeo, filtrado y hairpin sondeados en los NATs reales de las 12 celdas hairpin y las 32 cgnat_same con oráculo real | los del tipo declarado en las 44 |
+| 18 | NAT simétrico (APDM) en los dos lados | relay en los dos nodos; en el simulador llegan los 100 datagramas y en el NAT real 1 MiB con el mismo SHA-256 |
+| 27 | `TestCritAntiReplayProperty` con `-tags mutant_noreplay` | falla y nombra `property anti-replay violated` |
+| 28 | `TestCritRekeyTimers` con `-tags mutant_norekey` | falla y nombra `property rekey violated` |
+| 29 | `TestCritSimMatrix` con `-tags mutant_nopunch` | falla con `property nat-matrix violated` y nombra al menos una celda directa según la teoría que quedó en relay |
+| 30 | Líneas de código del apoyo (`sim/`, `verify/`) contra las del producto (`internal/`, `cmd/`), con `verify/cmd/loc` y con cloc | apoyo < producto con los dos contadores; el log del cierre no trae los totales |
+| 31 | Licencias de los módulos de la compilación y las pruebas, y compilación con `GOPROXY=off` | todas reconocidas como libres, ningún SDK de API de pago, compila sin red |
+| 32 | La suite completa dentro del entorno de §8 (sin espacios de red ni de usuario, sin capacidades, `GOPROXY=off`) | ninguna prueba falla y todos los criterios que se saltan dicen `needs-privilege:`; critrun sale con 77 en un criterio privilegiado y con 0 en uno sin privilegio |
+
+Las diferencias de los criterios 15 y 16 están explicadas en `matrix/findings.json`; ninguna se arregló cambiando el producto. Tiempos de esa corrida en esta máquina: `make check` 89.9 s (el paquete de la matriz, 89.2 s), el checker de K3 671.6 s, el de K1 256.0 s y el de K2 43.0 s.
+
+La primera verificación de cierre falló: nftables 1.1.7 rechazó las reglas de los NATs reales porque dos cadenas se llamaban `fwd` e `in`, palabras reservadas, así que ningún NAT real llegó a armarse; y la matriz simulada difería de la teoría en las 3 celdas de arriba. Se renombraron las cadenas, se registraron los 5 hallazgos, y el checker de la suite sin permisos pasó a correr critrun compilado, porque `go run` convierte cualquier salida distinta de 0 en 1. El código de la malla no cambió. Los límites que dejó K3, entre ellos que `make test-unpriv` sale con 1 sobre la suite completa, están en [`LIMITATIONS.md`](LIMITATIONS.md).
 
 ### K2 (verificado el 2026-11-01 UTC sobre el commit `5d64153`)
 
