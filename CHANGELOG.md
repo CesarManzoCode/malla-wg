@@ -2,6 +2,8 @@
 
 ## Sin publicar
 
+- critrun cuenta como aprobado el salto intencional de `TestForcedFailure`, la única excepción declarada, para que `make test-unpriv` no salga con 1 sobre la suite completa por él (p01).
+
 ### Matriz de NAT, mutantes y criterios globales (K3)
 
 Cerrado el 2026-11-01 UTC sobre el commit `7a83990`: los 11 criterios de salida pasan, entre ellos la matriz de conexión directa en el simulador y en NATs reales de Linux, que coinciden con la teoría salvo 5 celdas explicadas en `matrix/findings.json`.

@@ -71,6 +71,44 @@ func TestSummarize(t *testing.T) {
 	}
 }
 
+// TestIntentionalSkip: the declared skip of TestForcedFailure counts as
+// passed, but only in its package and with its message; any other skip
+// without needs-privilege still counts as not passed.
+func TestIntentionalSkip(t *testing.T) {
+	const props = "github.com/CesarManzoCode/malla-wg/verify/props"
+	forced := func(p, msg string) []event {
+		return []event{
+			{Action: "run", Package: p, Test: "TestForcedFailure"},
+			{Action: "output", Package: p, Test: "TestForcedFailure", Output: "    repro_test.go:24: " + msg + "\n"},
+			{Action: "skip", Package: p, Test: "TestForcedFailure"},
+		}
+	}
+	privSkip := []event{run("TestCritNet"),
+		out("TestCritNet", "    netns.go:58: needs-privilege: no userns\n"), end("TestCritNet", "skip")}
+	pkgPass := event{Action: "pass", Package: props}
+	cases := []struct {
+		name   string
+		events []event
+		code   int
+	}{
+		{"declared skip alone", append(forced(props, "MALLA_FORCE_FAIL=1 not set"), pkgPass), 0},
+		{"declared skip beside a privilege skip", append(append(forced(props, "MALLA_FORCE_FAIL=1 not set"),
+			privSkip...), pkgPass), 77},
+		{"declared test with another message", append(forced(props, "skipping in short mode"), pkgPass), 1},
+		{"same name in another package", append(forced(pkg, "MALLA_FORCE_FAIL=1 not set"), end("", "pass")), 1},
+		{"unexplained skip beside the declared one", append(append(forced(props, "MALLA_FORCE_FAIL=1 not set"),
+			run("TestB"), out("TestB", "    b_test.go:9: skipping\n"), end("TestB", "skip")), pkgPass), 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var w bytes.Buffer
+			if code := summarize(strings.NewReader(stream(t, c.events...)), &w); code != c.code {
+				t.Errorf("exit code %d, want %d; output:\n%s", code, c.code, w.String())
+			}
+		})
+	}
+}
+
 func TestPrivilegeSkipMessage(t *testing.T) {
 	for line, want := range map[string]bool{
 		"netns.go:58: needs-privilege: no userns": true,

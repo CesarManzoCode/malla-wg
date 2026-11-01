@@ -1,7 +1,8 @@
 // Command critrun runs `go test -json` with its arguments and turns the
 // result into the exit codes of the contract §7: 0 if every test passed,
 // 77 if the only tests not passed are skips whose message starts with
-// "needs-privilege:", and 1 otherwise. It prints one line
+// "needs-privilege:" (or the declared intentional skips), and 1 otherwise.
+// It prints one line
 // "<Test> pass|skip|fail" per top-level test.
 //
 //	go run ./verify/critrun -run '^TestCrit' ./verify/e2e
@@ -30,10 +31,32 @@ type event struct {
 // or without the "file.go:N: " prefix the testing package adds.
 var privilegeSkip = regexp.MustCompile(`^(\S+:\d+: )?needs-privilege:`)
 
+// intentionalSkips are the only skips without "needs-privilege:" that count
+// as passed, keyed by package and top-level test, each with the exact skip
+// message it must print; the same test skipping with any other message
+// still counts as not passed.
+var intentionalSkips = map[string]string{
+	// TestForcedFailure fails on purpose only under MALLA_FORCE_FAIL=1,
+	// which TestCritFailureRepro (criterion 26) sets in its child go test;
+	// in the suite it has nothing to check and skips.
+	"github.com/CesarManzoCode/malla-wg/verify/props\x00TestForcedFailure": "MALLA_FORCE_FAIL=1 not set",
+}
+
+// isIntentionalSkip reports whether line is the declared skip message of
+// the test key, with or without the "file.go:N: " prefix.
+func isIntentionalSkip(key, line string) bool {
+	msg, ok := intentionalSkips[key]
+	if !ok {
+		return false
+	}
+	return regexp.MustCompile(`^(\S+:\d+: )?` + regexp.QuoteMeta(msg) + `$`).MatchString(line)
+}
+
 type result struct {
-	name      string
-	action    string
-	privilege bool // its output has a needs-privilege skip message
+	name        string
+	action      string
+	privilege   bool // its output has a needs-privilege skip message
+	intentional bool // its output has its declared intentional skip message
 }
 
 // summarize reads a `go test -json` stream, prints one line per top-level
@@ -71,8 +94,12 @@ func summarize(r io.Reader, w io.Writer) int {
 		}
 		switch e.Action {
 		case "output":
-			if privilegeSkip.MatchString(strings.TrimSpace(e.Output)) {
+			line := strings.TrimSpace(e.Output)
+			if privilegeSkip.MatchString(line) {
 				res.privilege = true
+			}
+			if isIntentionalSkip(key, line) {
+				res.intentional = true
 			}
 		case "pass", "fail", "skip":
 			res.action = e.Action
@@ -82,6 +109,7 @@ func summarize(r io.Reader, w io.Writer) int {
 				failed++
 			case e.Action == "skip" && res.privilege:
 				privSkip++
+			case e.Action == "skip" && res.intentional:
 			case e.Action == "skip":
 				otherSkip++
 			}
