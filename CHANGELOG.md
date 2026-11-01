@@ -4,7 +4,7 @@
 
 ### Malla: coordinación, relay, traversal y CLI (K2)
 
-Implementada, pendiente de cierre: las pruebas de los criterios 19 a 24 están escritas y no se han corrido todavía.
+Cerrado el 2026-11-01 UTC sobre el commit `5d64153`: los 6 criterios de salida pasan, entre ellos la transferencia por el relay HTTPS con todo el UDP bloqueado y la migración de relay a directo en plena transferencia sin pérdida, duplicación ni nuevo handshake.
 
 - Servidor de coordinación HTTPS con registro, mapa de pares por long-poll, políticas con grupos y tags, revocación y servicio de endpoint reflexivo; el nodo sigue con el mapa en caché si la coordinación cae.
 - Relay HTTPS con tramas propias que solo reenvía datagramas WireGuard o disco ya cifrados.
@@ -13,6 +13,9 @@ Implementada, pendiente de cierre: las pruebas de los criterios 19 a 24 están e
 - Elección de camino: el directo confirmado por un pong de hace menos de 5 s con menor RTT, si no el relay; latido cada 2 s, vuelta al relay sin pong en 5 s y reintento de punching cada 30 s. Un datagrama WireGuard que llega por UDP mientras el par va por el relay dispara un ping a esa dirección, para pasar a directo sin esperar el reintento.
 - Migración sin corte: al cambiar de camino solo cambia el destino de salida; la entrada se acepta por los dos caminos y el handshake no se reinicia.
 - Socket de control en `state_dir/control.sock` y CLI: `malla status [-json]` informa `direct` o `relay` por par, y `malla wait-direct -peer <nombre> -timeout <dur>` sale con 0 al lograr camino directo y con 1 al vencer el plazo.
+- Un par sin autorización de la política no logra tráfico aunque conozca la clave; un par revocado sale del mapa, deja de recibir tráfico y no puede volver a registrarse con la misma clave; con la coordinación detenida, los pares ya conectados siguen intercambiando tráfico.
+- Con todo el UDP bloqueado, 4 MiB pasan por el relay HTTPS con el mismo SHA-256, y la captura del relay solo contiene ciphertext WireGuard o disco.
+- 16 MiB que empiezan por el relay pasan a camino directo en plena transferencia y llegan completos, sin duplicados y sin un nuevo handshake.
 
 ### Protocolo WireGuard e interoperabilidad (K1)
 

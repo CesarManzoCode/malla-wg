@@ -15,10 +15,28 @@ El diseño y las decisiones están en [`vault/CONTRACT.md`](vault/CONTRACT.md), 
 | --- | --- | --- |
 | K0 | Fundación: contrato, investigación, plan | Hecha |
 | K1 | Criptografía, protocolo WireGuard, simulador base, interoperabilidad con el kernel y wireguard-go, plano de datos | Cerrada |
-| K2 | Coordinación y políticas, relay HTTPS, descubrimiento y hole punching, elección de camino, migración, CLI | Implementada, pendiente de cierre |
+| K2 | Coordinación y políticas, relay HTTPS, descubrimiento y hole punching, elección de camino, migración, CLI | Cerrada |
 | K3 | Matriz de NAT (teoría, simulador, NATs reales), mutantes, conteo de líneas, dependencias, suite sin permisos | Pendiente |
 
 ## Resultados
+
+### K2 (verificado el 2026-11-01 UTC sobre el commit `5d64153`)
+
+Los 6 criterios de salida de K2 pasaron en una corrida sin `-short` que cuenta como fallo cualquier prueba saltada, y en la misma corrida volvieron a pasar los 16 de K1.
+
+| Qué se midió | Resultado |
+| --- | --- |
+| Política que permite solo A↔B: C, registrado y con la clave pública de B configurada, manda tráfico a B | no llega nada a B; el tráfico A↔B sí llega |
+| Revocación de B con A↔B fluyendo | la clave de B sale del mapa de A (respuesta de la coordinación y caché en disco), el tráfico de A a B deja de llegar y volver a registrar la clave se rechaza |
+| Coordinación detenida con A↔B conectados | cada datagrama entre A y B llega durante los 10 s medidos |
+| Todo el UDP entre A y B descartado por un router en espacios de red: 4 MiB por TCP dentro del túnel | llegan por el relay HTTPS con el mismo SHA-256; en la captura del relay solo hay mensajes WireGuard o disco, ningún byte del texto plano y ningún mensaje que abra con una clave del relay |
+| `malla wait-direct -timeout 5s` con UDP bloqueado | sale con distinto de 0 y `malla status` dice `relay` |
+| `malla wait-direct -timeout 30s` después de quitar el bloqueo | sale con 0 y `malla status` dice `direct` con endpoint |
+| 16 MiB por TCP a 1 MiB/s que empiezan por el relay; el bloqueo se quita a los 2 s | el camino pasa a directo durante la transferencia, llegan exactamente 16 MiB con el mismo SHA-256 y no hay ningún handshake ni rekey desde el cambio |
+
+Tiempos de esa corrida en esta máquina: `make check` 45.1 s (el paquete de pruebas de extremo a extremo, 42.3 s; el de interoperabilidad, 43.7 s), el checker de K2 43.2 s y el de K1 256.1 s.
+
+La primera verificación de cierre falló sin llegar a ejecutar la malla en las tres pruebas de red: iproute2 7.3 leía el nombre de interfaz `br` del arnés como la palabra clave `broadcast`. También fallaron dos pruebas unitarias por errores de sus propios escenarios. Se corrigieron el arnés y las dos pruebas; el código de la malla no cambió. Los límites que dejó K2 están en [`LIMITATIONS.md`](LIMITATIONS.md).
 
 ### K1 (verificado el 2026-10-31 sobre el commit `a9e1610`)
 
