@@ -15,6 +15,8 @@ vectors:
 # Criterion 32 of the contract: the whole suite, through critrun, inside the
 # unprivileged environment of §8 (no network or user namespaces, no
 # capabilities) and without network access to modules. critrun exits 77 if
-# the only tests not passed are needs-privilege skips.
+# the only tests not passed are needs-privilege skips. It is built first and
+# run as a binary because `go run` turns any non-zero exit into 1.
 test-unpriv:
-	unshare -rU sh -c 'echo 0 > /proc/sys/user/max_user_namespaces; exec setpriv --securebits +noroot,+noroot_locked,+no_setuid_fixup,+no_setuid_fixup_locked --bounding-set -all --inh-caps -all --ambient-caps -all -- env GOFLAGS=-mod=mod GOPROXY=off go run ./verify/critrun -count=1 ./...'
+	bin="$$(mktemp -d)/critrun" && go build -o "$$bin" ./verify/critrun && \
+	unshare -rU sh -c 'echo 0 > /proc/sys/user/max_user_namespaces; exec setpriv --securebits +noroot,+noroot_locked,+no_setuid_fixup,+no_setuid_fixup_locked --bounding-set -all --inh-caps -all --ambient-caps -all -- env GOFLAGS=-mod=mod GOPROXY=off "$$0" -count=1 ./...' "$$bin"

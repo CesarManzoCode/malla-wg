@@ -146,12 +146,12 @@ func (n *natBox) rules() string {
 		}
 	}
 	b.WriteString(`	}
-	chain fwd {
+	chain forward {
 		type filter hook forward priority filter; policy accept;
 		iifname != "wan" oifname != "wan" ct status dnat accept
 		iifname != "wan" oifname != "wan" drop
 	}
-	chain in {
+	chain input {
 		type filter hook input priority filter; policy accept;
 		meta l4proto udp drop
 	}
