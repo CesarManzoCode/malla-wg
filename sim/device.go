@@ -57,17 +57,8 @@ func (n *DeviceNode) Inject(pkt []byte) {
 // then TUN packets, then datagrams, each in the device's order.
 func (n *DeviceNode) absorb(out device.Output) {
 	s := n.Host.s
-	for _, e := range out.Events {
-		n.Events = append(n.Events, e)
-		r := Record{Ev: e.Kind.String(), Node: n.Host.Name, Reason: e.Reason, Peer: s.net.peerName(e.Peer)}
-		if e.Kind == device.EventDrop {
-			r.Ev = "wg_drop"
-		}
-		if e.Kind == device.EventEndpoint {
-			r.Dst = e.Endpoint.String()
-		}
-		s.Log(r)
-	}
+	n.Events = append(n.Events, out.Events...)
+	s.logEvents(n.Host, out.Events)
 	for _, p := range out.Packets {
 		s.Log(Record{Ev: "tun", Node: n.Host.Name, Len: len(p)})
 		n.TUN = append(n.TUN, p)
@@ -79,6 +70,20 @@ func (n *DeviceNode) absorb(out device.Output) {
 		n.Host.Send(n.Port, d.Dst, d.Data)
 	}
 	n.rearm()
+}
+
+// logEvents logs the device events of host h, a drop as wg_drop.
+func (s *Sim) logEvents(h *Host, evs []device.Event) {
+	for _, e := range evs {
+		r := Record{Ev: e.Kind.String(), Node: h.Name, Reason: e.Reason, Peer: s.net.peerName(e.Peer)}
+		if e.Kind == device.EventDrop {
+			r.Ev = "wg_drop"
+		}
+		if e.Kind == device.EventEndpoint {
+			r.Dst = e.Endpoint.String()
+		}
+		s.Log(r)
+	}
 }
 
 // rearm schedules a Tick at the device's next deadline. A timer event that

@@ -433,34 +433,7 @@ func (n *Node) apply(ctx context.Context, nm coord.Netmap, raw []byte) {
 		return
 	}
 	err := n.rt.Query(ctx, func(d *device.Device) {
-		want := make(map[[32]byte]bool, len(nm.Peers))
-		for _, p := range nm.Peers {
-			want[p.NodeKey] = true
-		}
-		for _, k := range d.Peers() {
-			if !want[k] {
-				d.RemovePeer(k)
-				n.bind.RemovePeer(k)
-			}
-		}
-		for _, p := range nm.Peers {
-			pc, cands := peerConfig(p)
-			if n.bind.Has(pc.PublicKey) {
-				// The device keeps its pseudo endpoint; only the
-				// candidates change, and the address the peer was last
-				// heard from stays. New candidates open a hole
-				// punching window.
-				n.bind.SetCandidates(pc.PublicKey, cands)
-				n.bind.SetDiscoKey(pc.PublicKey, p.DiscoKey)
-				continue
-			}
-			pc.Endpoint = n.bind.AddPeer(pc.PublicKey, cands)
-			n.bind.SetDiscoKey(pc.PublicKey, p.DiscoKey)
-			if err := d.AddPeer(pc); err != nil {
-				n.bind.RemovePeer(pc.PublicKey)
-				n.cfg.Logf("mesh: peer %s: %v", p.Name, err)
-			}
-		}
+		applyPeers(d, n.bind, nm.Peers, 0, n.cfg.Logf)
 	})
 	if err != nil {
 		return
