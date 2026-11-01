@@ -7,8 +7,8 @@ import (
 	"net/netip"
 )
 
-// Drop reasons of the network, from the contract §5. Middleboxes add their
-// own (K3: nat_filter, no_mapping).
+// Drop reasons of the network, from the contract §5. The NATs add their
+// own (DropNATFilter, DropNoMapping).
 const (
 	DropLoss    = "loss"
 	DropNoRoute = "no_route"
@@ -64,6 +64,7 @@ type network struct {
 	links  map[hostPair]*Link
 	boxes  []Middlebox
 	keys   map[[32]byte]string // device public key → host name
+	nat    *natTable           // the middlebox of every NAT, once there is one
 }
 
 func (n *network) init() {
