@@ -1,0 +1,17 @@
+{"format": "malla-nat-findings/1", "findings": [
+ {"group": "pair", "cell": "APDM-EIF|APDM-ADF", "oracle": "sim", "expected": "direct", "observed": "relay", "kind": "hallazgo",
+  "explanation": "La teoría de §4.1 cuenta como directo que los dos pares reciban un pong; el bind de internal/magic (contrato §3.3, [diseño, k2-03]) solo confirma una dirección si el pong llega desde la misma dirección a la que se mandó el ping. Detrás de un NAT APDM del simulador el pong a una dirección nueva sale por un mapeo nuevo, así que cada pong llega desde un puerto distinto del que se pingueó y ninguna dirección se confirma. Con la regla relajada a confirmar el destino del ping, las 185 celdas del simulador coinciden con la teoría (medido en el fix de k3 con las semillas 1 a 8). Difiere con todas las semillas 1 a 8.",
+  "seed": 1},
+ {"group": "pair", "cell": "APDM-EIF|APDM-EIF", "oracle": "sim", "expected": "direct", "observed": "relay", "kind": "hallazgo",
+  "explanation": "Misma causa que APDM-EIF|APDM-ADF: con APDM en los dos lados el pong siempre sale por un mapeo nuevo y no llega desde la dirección pingueada, que es lo que exige el bind (contrato §3.3, [diseño, k2-03]) para confirmar un camino directo. En el NAT real de nftables esta celda sí da directo, porque conntrack responde por el mismo puerto externo. Difiere con todas las semillas 1 a 8.",
+  "seed": 1},
+ {"group": "hairpin", "cell": "APDM-EIF|hairpin=True", "oracle": "sim", "expected": "direct", "observed": "relay", "kind": "hallazgo",
+  "explanation": "Es la celda APDM-EIF|APDM-EIF a través del hairpin del mismo NAT y falla por la misma causa: el pong sale por un mapeo nuevo y el bind (contrato §3.3, [diseño, k2-03]) no confirma una dirección cuyo pong llega desde otro puerto. Difiere con todas las semillas 1 a 8.",
+  "seed": 1},
+ {"group": "pair", "cell": "EIM-APDF|APDM-EIF", "oracle": "linux", "expected": "relay", "observed": "direct", "kind": "hallazgo",
+  "explanation": "El NAT APDM-EIF de nftables no se comporta como el APDM del modelo de §4.1 con un flujo que entra: el ping de a entra a b por el filtro EIF (dnat por @fc) y conntrack manda el pong de b, y luego los pings de b al endpoint de a, como respuesta de esa misma conexión, por el puerto externo al que llegó el ping y no por un mapeo nuevo. El filtro APDF de a, abierto hacia ese puerto, los deja pasar y los dos confirman. La teoría supone un mapeo nuevo para cada destino también en ese caso, y el sondeo de fidelidad solo mide flujos que salen. Direct en las 2 corridas completas de la matriz real del fix de k3.",
+  "seed": 0},
+ {"group": "pair", "cell": "APDM-EIF|APDM-APDF", "oracle": "linux", "expected": "relay", "observed": "direct", "kind": "hallazgo",
+  "explanation": "Misma causa que EIM-APDF|APDM-EIF: el ping de b entra a a por el filtro EIF y conntrack responde por el mismo puerto externo, que es el que b pingueó y hacia el que el filtro APDF de b está abierto, así que el pong llega desde la dirección pingueada y los dos confirman. Con el APDM del modelo de §4.1 la respuesta saldría por un mapeo nuevo y sería relay. Direct en las 2 corridas completas de la matriz real del fix de k3.",
+  "seed": 0}
+]}
